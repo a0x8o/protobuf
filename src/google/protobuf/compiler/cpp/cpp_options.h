@@ -44,8 +44,7 @@ namespace cpp {
 
 enum class EnforceOptimizeMode {
   kNoEnforcement,  // Use the runtime specified by the file specific options.
-  kSpeed,          // Full runtime with a generated code implementation.
-  kCodeSize,       // Full runtime with a reflective implementation.
+  kSpeed,          // This is the full runtime.
   kLiteRuntime,
 };
 
@@ -62,21 +61,11 @@ struct Options {
   bool lite_implicit_weak_fields = false;
   bool bootstrap = false;
   bool opensource_runtime = false;
-  bool annotate_accessor = false;
-  bool unused_field_stripping = false;
   std::string runtime_include_base;
   int num_cc_files = 0;
   std::string annotation_pragma_name;
   std::string annotation_guard_name;
   const AccessInfoMap* access_info_map = nullptr;
-  enum {
-    kTCTableNever,
-    kTCTableGuarded,
-    kTCTableAlways
-  } tctable_mode = kTCTableNever;
-  bool inject_field_listener_events = false;
-  bool eagerly_verified_lazy = false;
-  bool force_eagerly_verified_lazy = false;
 };
 
 }  // namespace cpp
