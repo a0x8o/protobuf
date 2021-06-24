@@ -30,7 +30,6 @@
 
 #include <google/protobuf/util/json_util.h>
 
-#include <cstdint>
 #include <list>
 #include <string>
 
@@ -242,7 +241,7 @@ TEST_F(JsonUtilTest, TestPrintEnumsAsIntsWithDefaultValue) {
 }
 
 TEST_F(JsonUtilTest, ParseMessage) {
-  // Some random message but good enough to verify that the parsing wrapper
+  // Some random message but good enough to verify that the parsing warpper
   // functions are working properly.
   std::string input =
       "{\n"
@@ -500,7 +499,7 @@ class SegmentedZeroCopyOutputStream : public io::ZeroCopyOutputStream {
         last_segment_(static_cast<char*>(NULL), 0),
         byte_count_(0) {}
 
-  bool Next(void** buffer, int* length) override {
+  virtual bool Next(void** buffer, int* length) {
     if (segments_.empty()) {
       return false;
     }
@@ -512,7 +511,7 @@ class SegmentedZeroCopyOutputStream : public io::ZeroCopyOutputStream {
     return true;
   }
 
-  void BackUp(int length) override {
+  virtual void BackUp(int length) {
     GOOGLE_CHECK(length <= last_segment_.second);
     segments_.push_front(
         Segment(last_segment_.first + last_segment_.second - length, length));
@@ -520,12 +519,12 @@ class SegmentedZeroCopyOutputStream : public io::ZeroCopyOutputStream {
     byte_count_ -= length;
   }
 
-  int64_t ByteCount() const override { return byte_count_; }
+  virtual int64 ByteCount() const { return byte_count_; }
 
  private:
   std::list<Segment> segments_;
   Segment last_segment_;
-  int64_t byte_count_;
+  int64 byte_count_;
 };
 
 // This test splits the output buffer and also the input data into multiple
@@ -633,7 +632,8 @@ TEST_F(JsonUtilTest, TestWrongJsonInput) {
   delete resolver;
 
   EXPECT_FALSE(result_status.ok());
-  EXPECT_TRUE(util::IsInvalidArgument(result_status));
+  EXPECT_EQ(result_status.code(),
+            util::error::INVALID_ARGUMENT);
 }
 
 TEST_F(JsonUtilTest, HtmlEscape) {
