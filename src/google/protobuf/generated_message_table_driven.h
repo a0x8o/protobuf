@@ -73,7 +73,9 @@ enum ProcessingTypes {
   TYPE_STRING_STRING_PIECE = 20,
   TYPE_BYTES_CORD = 21,
   TYPE_BYTES_STRING_PIECE = 22,
-  TYPE_MAP = 23,
+  TYPE_STRING_INLINED = 23,
+  TYPE_BYTES_INLINED = 24,
+  TYPE_MAP = 25,
 };
 
 static_assert(TYPE_MAP < kRepeatedMask, "Invalid enum");
@@ -100,11 +102,12 @@ struct PROTOBUF_EXPORT FieldMetadata {
     kNumTypeClasses  // must be last enum
   };
   // C++ protobuf has 20 fundamental types, were we added Cord and StringPiece
-  // and also distinguish the same types if they have different wire format.
+  // and also distinquish the same types if they have different wire format.
   enum {
     kCordType = 19,
     kStringPieceType = 20,
-    kNumTypes = 20,
+    kInlinedType = 21,
+    kNumTypes = 21,
     kSpecial = kNumTypes * kNumTypeClasses,
   };
 
@@ -117,7 +120,7 @@ struct PROTOBUF_EXPORT FieldMetadata {
 // ParseTableField is kept small to help simplify instructions for computing
 // offsets, as we will always need this information to parse a field.
 // Additional data, needed for some types, is stored in
-// AuxiliaryParseTableField.
+// AuxillaryParseTableField.
 struct ParseTableField {
   uint32 offset;
   // The presence_index ordinarily represents a has_bit index, but for fields
@@ -135,7 +138,7 @@ struct ParseTableField {
 
 struct ParseTable;
 
-union AuxiliaryParseTableField {
+union AuxillaryParseTableField {
   typedef bool (*EnumValidator)(int);
 
   // Enums
@@ -166,20 +169,20 @@ union AuxiliaryParseTableField {
   };
   map_aux maps;
 
-  AuxiliaryParseTableField() = default;
-  constexpr AuxiliaryParseTableField(AuxiliaryParseTableField::enum_aux e)
+  AuxillaryParseTableField() = default;
+  constexpr AuxillaryParseTableField(AuxillaryParseTableField::enum_aux e)
       : enums(e) {}
-  constexpr AuxiliaryParseTableField(AuxiliaryParseTableField::message_aux m)
+  constexpr AuxillaryParseTableField(AuxillaryParseTableField::message_aux m)
       : messages(m) {}
-  constexpr AuxiliaryParseTableField(AuxiliaryParseTableField::string_aux s)
+  constexpr AuxillaryParseTableField(AuxillaryParseTableField::string_aux s)
       : strings(s) {}
-  constexpr AuxiliaryParseTableField(AuxiliaryParseTableField::map_aux m)
+  constexpr AuxillaryParseTableField(AuxillaryParseTableField::map_aux m)
       : maps(m) {}
 };
 
 struct ParseTable {
   const ParseTableField* fields;
-  const AuxiliaryParseTableField* aux;
+  const AuxillaryParseTableField* aux;
   int max_field_number;
   // TODO(ckennelly): Do something with this padding.
 
@@ -203,22 +206,12 @@ struct ParseTable {
 static_assert(sizeof(ParseTableField) <= 16, "ParseTableField is too large");
 // The tables must be composed of POD components to ensure link-time
 // initialization.
-static_assert(std::is_standard_layout<ParseTableField>::value, "");
-static_assert(std::is_trivial<ParseTableField>::value, "");
-static_assert(std::is_standard_layout<AuxiliaryParseTableField>::value, "");
-static_assert(std::is_trivial<AuxiliaryParseTableField>::value, "");
-static_assert(
-    std::is_standard_layout<AuxiliaryParseTableField::enum_aux>::value, "");
-static_assert(std::is_trivial<AuxiliaryParseTableField::enum_aux>::value, "");
-static_assert(
-    std::is_standard_layout<AuxiliaryParseTableField::message_aux>::value, "");
-static_assert(std::is_trivial<AuxiliaryParseTableField::message_aux>::value,
-              "");
-static_assert(
-    std::is_standard_layout<AuxiliaryParseTableField::string_aux>::value, "");
-static_assert(std::is_trivial<AuxiliaryParseTableField::string_aux>::value, "");
-static_assert(std::is_standard_layout<ParseTable>::value, "");
-static_assert(std::is_trivial<ParseTable>::value, "");
+static_assert(std::is_pod<ParseTableField>::value, "");
+static_assert(std::is_pod<AuxillaryParseTableField>::value, "");
+static_assert(std::is_pod<AuxillaryParseTableField::enum_aux>::value, "");
+static_assert(std::is_pod<AuxillaryParseTableField::message_aux>::value, "");
+static_assert(std::is_pod<AuxillaryParseTableField::string_aux>::value, "");
+static_assert(std::is_pod<ParseTable>::value, "");
 
 // TODO(ckennelly): Consolidate these implementations into a single one, using
 // dynamic dispatch to the appropriate unknown field handler.
@@ -263,7 +256,7 @@ inline void TableSerialize(const MessageLite& msg,
   SerializeInternal(base, field_table + 1, num_fields, output);
 }
 
-PROTOBUF_EXPORT uint8* SerializeInternalToArray(const uint8* base, const FieldMetadata* table,
+uint8* SerializeInternalToArray(const uint8* base, const FieldMetadata* table,
                                 int32 num_fields, bool is_deterministic,
                                 uint8* buffer);
 
