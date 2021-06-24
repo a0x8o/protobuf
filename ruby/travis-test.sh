@@ -6,19 +6,25 @@ set -e
 test_version() {
   version=$1
 
-  RUBY_CONFORMANCE=test_ruby
+  # TODO(teboring): timestamp parsing is incorrect only on mac due to mktime.
+  if [[ $(uname -s) == Linux ]]
+  then
+    RUBY_CONFORMANCE=test_ruby
+  elif [[ $(uname -s) == Darwin ]]
+  then
+    # TODO(teboring): timestamp parsing is incorrect only on mac due to mktime.
+    RUBY_CONFORMANCE=test_ruby_mac
+  fi
 
-  if [ "$version" == "jruby-9.2.11.1" ] ; then
+  if [ "$version" == "jruby-1.7" ] ; then
+    # No conformance tests yet -- JRuby is too broken to run them.
     bash --login -c \
       "rvm install $version && rvm use $version && rvm get head && \
        which ruby && \
        git clean -f && \
        gem install bundler && bundle && \
-       rake test &&
-       rake gc_test &&
-       cd ../conformance && make test_jruby &&
-       cd ../ruby/compatibility_tests/v3.0.0 && ./test.sh"
-  elif [ "$version" == "ruby-2.6.0" -o "$version" == "ruby-2.7.0" -o "$version" == "ruby-3.0.0" ] ; then
+       rake test"
+  elif [ "$version" == "ruby-2.6.0" ] ; then
     bash --login -c \
       "rvm install $version && rvm use $version && \
        which ruby && \
