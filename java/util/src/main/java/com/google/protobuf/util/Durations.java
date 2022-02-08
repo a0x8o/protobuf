@@ -44,7 +44,6 @@ import static com.google.protobuf.util.Timestamps.NANOS_PER_SECOND;
 
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.protobuf.Duration;
-import java.io.Serializable;
 import java.text.ParseException;
 import java.util.Comparator;
 
@@ -73,25 +72,23 @@ public final class Durations {
 
   private Durations() {}
 
-  private static enum DurationComparator implements Comparator<Duration>, Serializable {
-    INSTANCE;
-
-    @Override
-    public int compare(Duration d1, Duration d2) {
-      checkValid(d1);
-      checkValid(d2);
-      int secDiff = Long.compare(d1.getSeconds(), d2.getSeconds());
-      return (secDiff != 0) ? secDiff : Integer.compare(d1.getNanos(), d2.getNanos());
-    }
-  }
+  private static final Comparator<Duration> COMPARATOR =
+      new Comparator<Duration>() {
+        @Override
+        public int compare(Duration d1, Duration d2) {
+          checkValid(d1);
+          checkValid(d2);
+          int secDiff = Long.compare(d1.getSeconds(), d2.getSeconds());
+          return (secDiff != 0) ? secDiff : Integer.compare(d1.getNanos(), d2.getNanos());
+        }
+      };
 
   /**
    * Returns a {@link Comparator} for {@link Duration}s which sorts in increasing chronological
-   * order. Nulls and invalid {@link Duration}s are not allowed (see {@link #isValid}). The returned
-   * comparator is serializable.
+   * order. Nulls and invalid {@link Duration}s are not allowed (see {@link #isValid}).
    */
   public static Comparator<Duration> comparator() {
-    return DurationComparator.INSTANCE;
+    return COMPARATOR;
   }
 
   /**
@@ -102,7 +99,7 @@ public final class Durations {
    *     and a value greater than {@code 0} if {@code x > y}
    */
   public static int compare(Duration x, Duration y) {
-    return DurationComparator.INSTANCE.compare(x, y);
+    return COMPARATOR.compare(x, y);
   }
 
   /**
@@ -149,12 +146,6 @@ public final class Durations {
     return (duration.getSeconds() == 0) ? duration.getNanos() < 0 : duration.getSeconds() < 0;
   }
 
-  /** Returns whether the given {@link Duration} is positive or not. */
-  public static boolean isPositive(Duration duration) {
-    checkValid(duration);
-    return !isNegative(duration) && !duration.equals(ZERO);
-  }
-
   /**
    * Ensures that the given {@link Duration} is not negative.
    *
@@ -163,6 +154,7 @@ public final class Durations {
    */
   @CanIgnoreReturnValue
   public static Duration checkNotNegative(Duration duration) {
+    checkValid(duration);
     checkArgument(!isNegative(duration), "duration (%s) must not be negative", toString(duration));
     return duration;
   }
@@ -175,7 +167,11 @@ public final class Durations {
    */
   @CanIgnoreReturnValue
   public static Duration checkPositive(Duration duration) {
-    checkArgument(isPositive(duration), "duration (%s) must be positive", toString(duration));
+    checkValid(duration);
+    checkArgument(
+        !isNegative(duration) && !duration.equals(ZERO),
+        "duration (%s) must be positive",
+        toString(duration));
     return duration;
   }
 

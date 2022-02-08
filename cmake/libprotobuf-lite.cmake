@@ -1,9 +1,7 @@
 set(libprotobuf_lite_files
   ${protobuf_source_dir}/src/google/protobuf/any_lite.cc
   ${protobuf_source_dir}/src/google/protobuf/arena.cc
-  ${protobuf_source_dir}/src/google/protobuf/arenastring.cc
   ${protobuf_source_dir}/src/google/protobuf/extension_set.cc
-  ${protobuf_source_dir}/src/google/protobuf/field_access_listener.cc
   ${protobuf_source_dir}/src/google/protobuf/generated_enum_util.cc
   ${protobuf_source_dir}/src/google/protobuf/generated_message_table_driven_lite.cc
   ${protobuf_source_dir}/src/google/protobuf/generated_message_util.cc
@@ -12,9 +10,8 @@ set(libprotobuf_lite_files
   ${protobuf_source_dir}/src/google/protobuf/io/io_win32.cc
   ${protobuf_source_dir}/src/google/protobuf/io/strtod.cc
   ${protobuf_source_dir}/src/google/protobuf/io/zero_copy_stream.cc
-  ${protobuf_source_dir}/src/google/protobuf/io/zero_copy_stream_impl.cc
+   ${protobuf_source_dir}/src/google/protobuf/io/zero_copy_stream_impl.cc
   ${protobuf_source_dir}/src/google/protobuf/io/zero_copy_stream_impl_lite.cc
-  ${protobuf_source_dir}/src/google/protobuf/map.cc
   ${protobuf_source_dir}/src/google/protobuf/message_lite.cc
   ${protobuf_source_dir}/src/google/protobuf/parse_context.cc
   ${protobuf_source_dir}/src/google/protobuf/repeated_field.cc
@@ -58,7 +55,7 @@ set(libprotobuf_lite_includes
   ${protobuf_source_dir}/src/google/protobuf/wire_format_lite.h
 )
 
-if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+if (MSVC)
 set(libprotobuf_lite_rc_files
   ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
@@ -67,12 +64,6 @@ endif()
 add_library(libprotobuf-lite ${protobuf_SHARED_OR_STATIC}
   ${libprotobuf_lite_files} ${libprotobuf_lite_includes} ${libprotobuf_lite_rc_files})
 target_link_libraries(libprotobuf-lite ${CMAKE_THREAD_LIBS_INIT})
-if(protobuf_LINK_LIBATOMIC)
-  target_link_libraries(libprotobuf-lite atomic)
-endif()
-if(${CMAKE_SYSTEM_NAME} STREQUAL "Android")
-	target_link_libraries(libprotobuf-lite log)
-endif()
 target_include_directories(libprotobuf-lite PUBLIC ${protobuf_source_dir}/src)
 if(MSVC AND protobuf_BUILD_SHARED_LIBS)
   target_compile_definitions(libprotobuf-lite
