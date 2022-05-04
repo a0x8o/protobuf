@@ -67,38 +67,6 @@ static std::unordered_map<const DescriptorPool*, PyDescriptorPool*>*
 
 namespace cdescriptor_pool {
 
-// Collects errors that occur during proto file building to allow them to be
-// propagated in the python exception instead of only living in ERROR logs.
-class BuildFileErrorCollector : public DescriptorPool::ErrorCollector {
- public:
-  BuildFileErrorCollector() : error_message(""), had_errors_(false) {}
-
-  void AddError(const std::string& filename, const std::string& element_name,
-                const Message* descriptor, ErrorLocation location,
-                const std::string& message) override {
-    // Replicates the logging behavior that happens in the C++ implementation
-    // when an error collector is not passed in.
-    if (!had_errors_) {
-      error_message +=
-          ("Invalid proto descriptor for file \"" + filename + "\":\n");
-      had_errors_ = true;
-    }
-    // As this only happens on failure and will result in the program not
-    // running at all, no effort is made to optimize this string manipulation.
-    error_message += ("  " + element_name + ": " + message + "\n");
-  }
-
-  void Clear() {
-    had_errors_ = false;
-    error_message = "";
-  }
-
-  std::string error_message;
-
- private:
-  bool had_errors_;
-};
-
 // Create a Python DescriptorPool object, but does not fill the "pool"
 // attribute.
 static PyDescriptorPool* _CreateDescriptorPool() {
@@ -108,7 +76,6 @@ static PyDescriptorPool* _CreateDescriptorPool() {
     return NULL;
   }
 
-  cpool->error_collector = nullptr;
   cpool->underlay = NULL;
   cpool->database = NULL;
 
@@ -157,8 +124,7 @@ static PyDescriptorPool* PyDescriptorPool_NewWithDatabase(
     return NULL;
   }
   if (database != NULL) {
-    cpool->error_collector = new BuildFileErrorCollector();
-    cpool->pool = new DescriptorPool(database, cpool->error_collector);
+    cpool->pool = new DescriptorPool(database);
     cpool->database = database;
   } else {
     cpool->pool = new DescriptorPool();
@@ -176,10 +142,9 @@ static PyDescriptorPool* PyDescriptorPool_NewWithDatabase(
 // The public DescriptorPool constructor.
 static PyObject* New(PyTypeObject* type,
                      PyObject* args, PyObject* kwargs) {
-  static const char* kwlist[] = {"descriptor_db", 0};
+  static char* kwlist[] = {"descriptor_db", 0};
   PyObject* py_database = NULL;
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O",
-                                   const_cast<char**>(kwlist), &py_database)) {
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist, &py_database)) {
     return NULL;
   }
   DescriptorDatabase* database = NULL;
@@ -202,7 +167,6 @@ static void Dealloc(PyObject* pself) {
   delete self->descriptor_options;
   delete self->database;
   delete self->pool;
-  delete self->error_collector;
   Py_TYPE(self)->tp_free(pself);
 }
 
@@ -218,20 +182,6 @@ static int GcClear(PyObject* pself) {
   return 0;
 }
 
-PyObject* SetErrorFromCollector(DescriptorPool::ErrorCollector* self,
-                                const char* name, const char* error_type) {
-  BuildFileErrorCollector* error_collector =
-      reinterpret_cast<BuildFileErrorCollector*>(self);
-  if (error_collector && !error_collector->error_message.empty()) {
-    PyErr_Format(PyExc_KeyError, "Couldn't build file for %s %.200s\n%s",
-                 error_type, name, error_collector->error_message.c_str());
-    error_collector->Clear();
-    return NULL;
-  }
-  PyErr_Format(PyExc_KeyError, "Couldn't find %s %.200s", error_type, name);
-  return NULL;
-}
-
 static PyObject* FindMessageByName(PyObject* self, PyObject* arg) {
   Py_ssize_t name_size;
   char* name;
@@ -241,12 +191,11 @@ static PyObject* FindMessageByName(PyObject* self, PyObject* arg) {
 
   const Descriptor* message_descriptor =
       reinterpret_cast<PyDescriptorPool*>(self)->pool->FindMessageTypeByName(
-          StringParam(name, name_size));
+          string(name, name_size));
 
   if (message_descriptor == NULL) {
-    return SetErrorFromCollector(
-        reinterpret_cast<PyDescriptorPool*>(self)->error_collector, name,
-        "message");
+    PyErr_Format(PyExc_KeyError, "Couldn't find message %.200s", name);
+    return NULL;
   }
 
 
@@ -263,12 +212,12 @@ static PyObject* FindFileByName(PyObject* self, PyObject* arg) {
     return NULL;
   }
 
-  PyDescriptorPool* py_pool = reinterpret_cast<PyDescriptorPool*>(self);
   const FileDescriptor* file_descriptor =
-      py_pool->pool->FindFileByName(StringParam(name, name_size));
-
+      reinterpret_cast<PyDescriptorPool*>(self)->pool->FindFileByName(
+          string(name, name_size));
   if (file_descriptor == NULL) {
-    return SetErrorFromCollector(py_pool->error_collector, name, "file");
+    PyErr_Format(PyExc_KeyError, "Couldn't find file %.200s", name);
+    return NULL;
   }
   return PyFileDescriptor_FromDescriptor(file_descriptor);
 }
@@ -281,9 +230,11 @@ PyObject* FindFieldByName(PyDescriptorPool* self, PyObject* arg) {
   }
 
   const FieldDescriptor* field_descriptor =
-      self->pool->FindFieldByName(StringParam(name, name_size));
+      self->pool->FindFieldByName(string(name, name_size));
   if (field_descriptor == NULL) {
-    return SetErrorFromCollector(self->error_collector, name, "field");
+    PyErr_Format(PyExc_KeyError, "Couldn't find field %.200s",
+                 name);
+    return NULL;
   }
 
 
@@ -302,10 +253,10 @@ PyObject* FindExtensionByName(PyDescriptorPool* self, PyObject* arg) {
   }
 
   const FieldDescriptor* field_descriptor =
-      self->pool->FindExtensionByName(StringParam(name, name_size));
+      self->pool->FindExtensionByName(string(name, name_size));
   if (field_descriptor == NULL) {
-    return SetErrorFromCollector(self->error_collector, name,
-                                 "extension field");
+    PyErr_Format(PyExc_KeyError, "Couldn't find extension field %.200s", name);
+    return NULL;
   }
 
 
@@ -324,9 +275,10 @@ PyObject* FindEnumTypeByName(PyDescriptorPool* self, PyObject* arg) {
   }
 
   const EnumDescriptor* enum_descriptor =
-      self->pool->FindEnumTypeByName(StringParam(name, name_size));
+      self->pool->FindEnumTypeByName(string(name, name_size));
   if (enum_descriptor == NULL) {
-    return SetErrorFromCollector(self->error_collector, name, "enum");
+    PyErr_Format(PyExc_KeyError, "Couldn't find enum %.200s", name);
+    return NULL;
   }
 
 
@@ -345,9 +297,10 @@ PyObject* FindOneofByName(PyDescriptorPool* self, PyObject* arg) {
   }
 
   const OneofDescriptor* oneof_descriptor =
-      self->pool->FindOneofByName(StringParam(name, name_size));
+      self->pool->FindOneofByName(string(name, name_size));
   if (oneof_descriptor == NULL) {
-    return SetErrorFromCollector(self->error_collector, name, "oneof");
+    PyErr_Format(PyExc_KeyError, "Couldn't find oneof %.200s", name);
+    return NULL;
   }
 
 
@@ -367,11 +320,10 @@ static PyObject* FindServiceByName(PyObject* self, PyObject* arg) {
 
   const ServiceDescriptor* service_descriptor =
       reinterpret_cast<PyDescriptorPool*>(self)->pool->FindServiceByName(
-          StringParam(name, name_size));
+          string(name, name_size));
   if (service_descriptor == NULL) {
-    return SetErrorFromCollector(
-        reinterpret_cast<PyDescriptorPool*>(self)->error_collector, name,
-        "service");
+    PyErr_Format(PyExc_KeyError, "Couldn't find service %.200s", name);
+    return NULL;
   }
 
 
@@ -387,11 +339,10 @@ static PyObject* FindMethodByName(PyObject* self, PyObject* arg) {
 
   const MethodDescriptor* method_descriptor =
       reinterpret_cast<PyDescriptorPool*>(self)->pool->FindMethodByName(
-          StringParam(name, name_size));
+          string(name, name_size));
   if (method_descriptor == NULL) {
-    return SetErrorFromCollector(
-        reinterpret_cast<PyDescriptorPool*>(self)->error_collector, name,
-        "method");
+    PyErr_Format(PyExc_KeyError, "Couldn't find method %.200s", name);
+    return NULL;
   }
 
 
@@ -407,11 +358,10 @@ static PyObject* FindFileContainingSymbol(PyObject* self, PyObject* arg) {
 
   const FileDescriptor* file_descriptor =
       reinterpret_cast<PyDescriptorPool*>(self)->pool->FindFileContainingSymbol(
-          StringParam(name, name_size));
+          string(name, name_size));
   if (file_descriptor == NULL) {
-    return SetErrorFromCollector(
-        reinterpret_cast<PyDescriptorPool*>(self)->error_collector, name,
-        "symbol");
+    PyErr_Format(PyExc_KeyError, "Couldn't find symbol %.200s", name);
+    return NULL;
   }
 
 
@@ -434,16 +384,7 @@ static PyObject* FindExtensionByNumber(PyObject* self, PyObject* args) {
       reinterpret_cast<PyDescriptorPool*>(self)->pool->FindExtensionByNumber(
           descriptor, number);
   if (extension_descriptor == NULL) {
-    BuildFileErrorCollector* error_collector =
-        reinterpret_cast<BuildFileErrorCollector*>(
-            reinterpret_cast<PyDescriptorPool*>(self)->error_collector);
-    if (error_collector && !error_collector->error_message.empty()) {
-      PyErr_Format(PyExc_KeyError, "Couldn't build file for Extension %.d\n%s",
-                   number, error_collector->error_message.c_str());
-      error_collector->Clear();
-      return NULL;
-    }
-    PyErr_Format(PyExc_KeyError, "Couldn't find Extension %d", number);
+    PyErr_Format(PyExc_KeyError, "Couldn't find extension %d", number);
     return NULL;
   }
 
@@ -570,6 +511,32 @@ static PyObject* AddServiceDescriptor(PyObject* self, PyObject* descriptor) {
 }
 
 // The code below loads new Descriptors from a serialized FileDescriptorProto.
+
+// Collects errors that occur during proto file building to allow them to be
+// propagated in the python exception instead of only living in ERROR logs.
+class BuildFileErrorCollector : public DescriptorPool::ErrorCollector {
+ public:
+  BuildFileErrorCollector() : error_message(""), had_errors(false) {}
+
+  void AddError(const string& filename, const string& element_name,
+                const Message* descriptor, ErrorLocation location,
+                const string& message) {
+    // Replicates the logging behavior that happens in the C++ implementation
+    // when an error collector is not passed in.
+    if (!had_errors) {
+      error_message +=
+          ("Invalid proto descriptor for file \"" + filename + "\":\n");
+      had_errors = true;
+    }
+    // As this only happens on failure and will result in the program not
+    // running at all, no effort is made to optimize this string manipulation.
+    error_message += ("  " + element_name + ": " + message + "\n");
+  }
+
+  string error_message;
+  bool had_errors;
+};
+
 static PyObject* AddSerializedFile(PyObject* pself, PyObject* serialized_pb) {
   PyDescriptorPool* self = reinterpret_cast<PyDescriptorPool*>(pself);
   char* message_type;
