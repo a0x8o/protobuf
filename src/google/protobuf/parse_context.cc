@@ -48,7 +48,7 @@ namespace internal {
 namespace {
 
 // Only call if at start of tag.
-bool ParseEndsInSlopRegion(const char* begin, int overrun, int depth) {
+bool ParseEndsInSlopRegion(const char* begin, int overrun, int d) {
   constexpr int kSlopBytes = EpsCopyInputStream::kSlopBytes;
   GOOGLE_DCHECK(overrun >= 0);
   GOOGLE_DCHECK(overrun <= kSlopBytes);
@@ -64,7 +64,7 @@ bool ParseEndsInSlopRegion(const char* begin, int overrun, int depth) {
     switch (tag & 7) {
       case 0: {  // Varint
         uint64 val;
-        ptr = VarintParse(ptr, &val);
+        ptr = ParseVarint64(ptr, &val);
         if (ptr == nullptr) return false;
         break;
       }
@@ -79,11 +79,11 @@ bool ParseEndsInSlopRegion(const char* begin, int overrun, int depth) {
         break;
       }
       case 3: {  // start group
-        depth++;
+        d++;
         break;
       }
       case 4: {                    // end group
-        if (--depth < 0) return true;  // We exit early
+        if (--d < 0) return true;  // We exit early
         break;
       }
       case 5: {  // fixed32
@@ -99,7 +99,7 @@ bool ParseEndsInSlopRegion(const char* begin, int overrun, int depth) {
 
 }  // namespace
 
-const char* EpsCopyInputStream::NextBuffer(int overrun, int depth) {
+const char* EpsCopyInputStream::Next(int overrun, int d) {
   if (next_chunk_ == nullptr) return nullptr;  // We've reached end of stream.
   if (next_chunk_ != buffer_) {
     GOOGLE_DCHECK(size_ > kSlopBytes);
@@ -115,11 +115,12 @@ const char* EpsCopyInputStream::NextBuffer(int overrun, int depth) {
   // buffer_.
   std::memmove(buffer_, buffer_end_, kSlopBytes);
   if (overall_limit_ > 0 &&
-      (depth < 0 || !ParseEndsInSlopRegion(buffer_, overrun, depth))) {
+      (d < 0 || !ParseEndsInSlopRegion(buffer_, overrun, d))) {
     const void* data;
     // ZeroCopyInputStream indicates Next may return 0 size buffers. Hence
     // we loop.
-    while (StreamNext(&data)) {
+    while (zcis_->Next(&data, &size_)) {
+      overall_limit_ -= size_;
       if (size_ > kSlopBytes) {
         // We got a large chunk
         std::memcpy(buffer_ + kSlopBytes, data, kSlopBytes);
@@ -154,22 +155,11 @@ const char* EpsCopyInputStream::NextBuffer(int overrun, int depth) {
   return buffer_;
 }
 
-const char* EpsCopyInputStream::Next() {
-  GOOGLE_DCHECK(limit_ > kSlopBytes);
-  auto p = NextBuffer(0 /* immaterial */, -1);
-  if (p == nullptr) {
-    limit_end_ = buffer_end_;
-    // Distinguish ending on a pushed limit or ending on end-of-stream.
-    SetEndOfStream();
-    return nullptr;
-  }
-  limit_ -= buffer_end_ - p;  // Adjust limit_ relative to new anchor
-  limit_end_ = buffer_end_ + std::min(0, limit_);
-  return p;
-}
-
-std::pair<const char*, bool> EpsCopyInputStream::DoneFallback(int overrun,
-                                                              int depth) {
+std::pair<const char*, bool> EpsCopyInputStream::DoneFallback(const char* ptr,
+                                                              int d) {
+  GOOGLE_DCHECK(ptr >= limit_end_);
+  int overrun = ptr - buffer_end_;
+  GOOGLE_DCHECK(overrun <= kSlopBytes);  // Guaranteed by parse loop.
   // Did we exceeded the limit (parse error).
   if (PROTOBUF_PREDICT_FALSE(overrun > limit_)) return {nullptr, true};
   GOOGLE_DCHECK(overrun != limit_);  // Guaranteed by caller.
@@ -182,26 +172,25 @@ std::pair<const char*, bool> EpsCopyInputStream::DoneFallback(int overrun,
   // At this point we know the following assertion holds.
   GOOGLE_DCHECK(limit_ > 0);
   GOOGLE_DCHECK(limit_end_ == buffer_end_);  // because limit_ > 0
-  const char* p;
   do {
     // We are past the end of buffer_end_, in the slop region.
     GOOGLE_DCHECK(overrun >= 0);
-    p = NextBuffer(overrun, depth);
+    auto p = Next(overrun, d);
     if (p == nullptr) {
       // We are at the end of the stream
       if (PROTOBUF_PREDICT_FALSE(overrun != 0)) return {nullptr, true};
       GOOGLE_DCHECK(limit_ > 0);
       limit_end_ = buffer_end_;
-      // Distinguish ending on a pushed limit or ending on end-of-stream.
+      // Distinquish ending on a pushed limit or ending on end-of-stream.
       SetEndOfStream();
-      return {buffer_end_, true};
+      return {ptr, true};
     }
     limit_ -= buffer_end_ - p;  // Adjust limit_ relative to new anchor
-    p += overrun;
-    overrun = p - buffer_end_;
+    ptr = p + overrun;
+    overrun = ptr - buffer_end_;
   } while (overrun >= 0);
   limit_end_ = buffer_end_ + std::min(0, limit_);
-  return {p, false};
+  return {ptr, false};
 }
 
 const char* EpsCopyInputStream::SkipFallback(const char* ptr, int size) {
@@ -209,42 +198,63 @@ const char* EpsCopyInputStream::SkipFallback(const char* ptr, int size) {
 }
 
 const char* EpsCopyInputStream::ReadStringFallback(const char* ptr, int size,
-                                                   std::string* str) {
-  str->clear();
+                                                   std::string* s) {
+  s->clear();
+  // TODO(gerbens) assess security. At the moment its parity with
+  // CodedInputStream but it allows a payload to reserve large memory.
   if (PROTOBUF_PREDICT_TRUE(size <= buffer_end_ - ptr + limit_)) {
-    // Reserve the string up to a static safe size. If strings are bigger than
-    // this we proceed by growing the string as needed. This protects against
-    // malicious payloads making protobuf hold on to a lot of memory.
-    str->reserve(str->size() + std::min<int>(size, kSafeStringSize));
+    s->reserve(size);
   }
-  return AppendSize(ptr, size,
-                    [str](const char* p, int s) { str->append(p, s); });
+  return AppendStringFallback(ptr, size, s);
 }
 
 const char* EpsCopyInputStream::AppendStringFallback(const char* ptr, int size,
                                                      std::string* str) {
+  // TODO(gerbens) assess security. At the moment its parity with
+  // CodedInputStream but it allows a payload to reserve large memory.
   if (PROTOBUF_PREDICT_TRUE(size <= buffer_end_ - ptr + limit_)) {
-    // Reserve the string up to a static safe size. If strings are bigger than
-    // this we proceed by growing the string as needed. This protects against
-    // malicious payloads making protobuf hold on to a lot of memory.
-    str->reserve(str->size() + std::min<int>(size, kSafeStringSize));
+    str->reserve(size);
   }
   return AppendSize(ptr, size,
                     [str](const char* p, int s) { str->append(p, s); });
 }
 
 
-template <int>
-void byteswap(void* p);
-template <>
-void byteswap<1>(void* p) {}
-template <>
-void byteswap<4>(void* p) {
-  *static_cast<uint32*>(p) = bswap_32(*static_cast<uint32*>(p));
+template <typename Tag, typename T>
+const char* EpsCopyInputStream::ReadRepeatedFixed(const char* ptr,
+                                                  Tag expected_tag,
+                                                  RepeatedField<T>* out) {
+  do {
+    out->Add(UnalignedLoad<T>(ptr));
+    ptr += sizeof(T);
+    if (PROTOBUF_PREDICT_FALSE(ptr >= limit_end_)) return ptr;
+  } while (UnalignedLoad<Tag>(ptr) == expected_tag&& ptr += sizeof(Tag));
+  return ptr;
 }
-template <>
-void byteswap<8>(void* p) {
-  *static_cast<uint64*>(p) = bswap_64(*static_cast<uint64*>(p));
+
+template <typename T>
+const char* EpsCopyInputStream::ReadPackedFixed(const char* ptr, int size,
+                                                RepeatedField<T>* out) {
+  int nbytes = buffer_end_ + kSlopBytes - ptr;
+  while (size > nbytes) {
+    int num = nbytes / sizeof(T);
+    int old_entries = out->size();
+    out->Reserve(old_entries + num);
+    int block_size = num * sizeof(T);
+    std::memcpy(out->AddNAlreadyReserved(num), ptr, block_size);
+    ptr += block_size;
+    size -= block_size;
+    if (DoneWithCheck(&ptr, -1)) return nullptr;
+    nbytes = buffer_end_ + kSlopBytes - ptr;
+  }
+  int num = size / sizeof(T);
+  int old_entries = out->size();
+  out->Reserve(old_entries + num);
+  int block_size = num * sizeof(T);
+  std::memcpy(out->AddNAlreadyReserved(num), ptr, block_size);
+  ptr += block_size;
+  if (size != block_size) return nullptr;
+  return ptr;
 }
 
 const char* EpsCopyInputStream::InitFrom(io::ZeroCopyInputStream* zcis) {
@@ -276,18 +286,7 @@ const char* EpsCopyInputStream::InitFrom(io::ZeroCopyInputStream* zcis) {
   return buffer_;
 }
 
-const char* ParseContext::ReadSizeAndPushLimitAndDepth(const char* ptr,
-                                                       int* old_limit) {
-  int size = ReadSize(&ptr);
-  if (PROTOBUF_PREDICT_FALSE(!ptr)) {
-    *old_limit = 0;  // Make sure this isn't uninitialized even on error return
-    return nullptr;
-  }
-  *old_limit = PushLimit(ptr, size);
-  if (--depth_ < 0) return nullptr;
-  return ptr;
-}
-
+#if GOOGLE_PROTOBUF_ENABLE_EXPERIMENTAL_PARSER
 const char* ParseContext::ParseMessage(MessageLite* msg, const char* ptr) {
   return ParseMessage<MessageLite>(msg, ptr);
 }
@@ -295,6 +294,7 @@ const char* ParseContext::ParseMessage(Message* msg, const char* ptr) {
   // Use reinterptret case to prevent inclusion of non lite header
   return ParseMessage(reinterpret_cast<MessageLite*>(msg), ptr);
 }
+#endif
 
 inline void WriteVarint(uint64 val, std::string* s) {
   while (val >= 128) {
@@ -316,40 +316,10 @@ void WriteLengthDelimited(uint32 num, StringPiece val, std::string* s) {
   s->append(val.data(), val.size());
 }
 
-std::pair<const char*, uint32> VarintParseSlow32(const char* p, uint32 res) {
-  for (std::uint32_t i = 2; i < 5; i++) {
-    uint32 byte = static_cast<uint8>(p[i]);
-    res += (byte - 1) << (7 * i);
-    if (PROTOBUF_PREDICT_TRUE(byte < 128)) {
-      return {p + i + 1, res};
-    }
-  }
-  // Accept >5 bytes
-  for (std::uint32_t i = 5; i < 10; i++) {
-    uint32 byte = static_cast<uint8>(p[i]);
-    if (PROTOBUF_PREDICT_TRUE(byte < 128)) {
-      return {p + i + 1, res};
-    }
-  }
-  return {nullptr, 0};
-}
-
-std::pair<const char*, uint64> VarintParseSlow64(const char* p, uint32 res32) {
-  uint64 res = res32;
-  for (std::uint32_t i = 2; i < 10; i++) {
-    uint64 byte = static_cast<uint8>(p[i]);
-    res += (byte - 1) << (7 * i);
-    if (PROTOBUF_PREDICT_TRUE(byte < 128)) {
-      return {p + i + 1, res};
-    }
-  }
-  return {nullptr, 0};
-}
-
 std::pair<const char*, uint32> ReadTagFallback(const char* p, uint32 res) {
-  for (std::uint32_t i = 2; i < 5; i++) {
-    uint32 byte = static_cast<uint8>(p[i]);
-    res += (byte - 1) << (7 * i);
+  for (std::uint32_t i = 0; i < 3; i++) {
+    std::uint32_t byte = static_cast<uint8>(p[i]);
+    res += (byte - 1) << (7 * (i + 2));
     if (PROTOBUF_PREDICT_TRUE(byte < 128)) {
       return {p + i + 1, res};
     }
@@ -357,24 +327,16 @@ std::pair<const char*, uint32> ReadTagFallback(const char* p, uint32 res) {
   return {nullptr, 0};
 }
 
-std::pair<const char*, int32> ReadSizeFallback(const char* p, uint32 res) {
-  for (std::uint32_t i = 1; i < 4; i++) {
-    uint32 byte = static_cast<uint8>(p[i]);
-    res += (byte - 1) << (7 * i);
-    if (PROTOBUF_PREDICT_TRUE(byte < 128)) {
-      return {p + i + 1, res};
-    }
-  }
-  std::uint32_t byte = static_cast<uint8>(p[4]);
-  if (PROTOBUF_PREDICT_FALSE(byte >= 8)) return {nullptr, 0};  // size >= 2gb
-  res += (byte - 1) << 28;
-  // Protect against sign integer overflow in PushLimit. Limits are relative
-  // to buffer ends and ptr could potential be kSlopBytes beyond a buffer end.
-  // To protect against overflow we reject limits absurdly close to INT_MAX.
-  if (PROTOBUF_PREDICT_FALSE(res > INT_MAX - ParseContext::kSlopBytes)) {
-    return {nullptr, 0};
-  }
-  return {p + 5, res};
+std::pair<const char*, uint64> ParseVarint64Fallback(const char* p,
+                                                     uint64 res) {
+  return ParseVarint64FallbackInline(p, res);
+}
+
+std::pair<const char*, int32> ReadSizeFallback(const char* p, uint32 first) {
+  uint32 tmp;
+  auto res = VarintParse<4>(p + 1, &tmp);
+  if (tmp >= (1 << 24) - ParseContext::kSlopBytes) return {nullptr, 0};
+  return {res, (tmp << 7) + first - 0x80};
 }
 
 const char* StringParser(const char* begin, const char* end, void* object,
@@ -401,6 +363,14 @@ const char* InlineGreedyStringParser(std::string* s, const char* ptr,
   int size = ReadSize(&ptr);
   if (!ptr) return nullptr;
   return ctx->ReadString(ptr, size, s);
+}
+
+const char* InlineGreedyStringParserUTF8(std::string* s, const char* ptr,
+                                         ParseContext* ctx,
+                                         const char* field_name) {
+  auto p = InlineGreedyStringParser(s, ptr, ctx);
+  GOOGLE_PROTOBUF_PARSER_ASSERT(VerifyUTF8(*s, field_name));
+  return p;
 }
 
 
@@ -448,6 +418,34 @@ const char* PackedSInt64Parser(void* object, const char* ptr,
 
 const char* PackedEnumParser(void* object, const char* ptr, ParseContext* ctx) {
   return VarintParser<int, false>(object, ptr, ctx);
+}
+
+const char* PackedEnumParser(void* object, const char* ptr, ParseContext* ctx,
+                             bool (*is_valid)(int), std::string* unknown,
+                             int field_num) {
+  return ctx->ReadPackedVarint(
+      ptr, [object, is_valid, unknown, field_num](uint64 val) {
+        if (is_valid(val)) {
+          static_cast<RepeatedField<int>*>(object)->Add(val);
+        } else {
+          WriteVarint(field_num, val, unknown);
+        }
+      });
+}
+
+const char* PackedEnumParserArg(void* object, const char* ptr,
+                                ParseContext* ctx,
+                                bool (*is_valid)(const void*, int),
+                                const void* data, std::string* unknown,
+                                int field_num) {
+  return ctx->ReadPackedVarint(
+      ptr, [object, is_valid, data, unknown, field_num](uint64 val) {
+        if (is_valid(data, val)) {
+          static_cast<RepeatedField<int>*>(object)->Add(val);
+        } else {
+          WriteVarint(field_num, val, unknown);
+        }
+      });
 }
 
 const char* PackedBoolParser(void* object, const char* ptr, ParseContext* ctx) {
@@ -501,8 +499,7 @@ class UnknownFieldLiteParserHelper {
     if (unknown_ == nullptr) return;
     WriteVarint(num * 8 + 1, unknown_);
     char buffer[8];
-    io::CodedOutputStream::WriteLittleEndian64ToArray(
-        value, reinterpret_cast<uint8*>(buffer));
+    std::memcpy(buffer, &value, 8);
     unknown_->append(buffer, 8);
   }
   const char* ParseLengthDelimited(uint32 num, const char* ptr,
@@ -525,8 +522,7 @@ class UnknownFieldLiteParserHelper {
     if (unknown_ == nullptr) return;
     WriteVarint(num * 8 + 5, unknown_);
     char buffer[4];
-    io::CodedOutputStream::WriteLittleEndian32ToArray(
-        value, reinterpret_cast<uint8*>(buffer));
+    std::memcpy(buffer, &value, 4);
     unknown_->append(buffer, 4);
   }
 
@@ -550,8 +546,12 @@ const char* UnknownFieldParse(uint32 tag, std::string* unknown, const char* ptr,
   return FieldParser(tag, field_parser, ptr, ctx);
 }
 
+const char* UnknownFieldParse(uint32 tag,
+                              InternalMetadataWithArenaLite* metadata,
+                              const char* ptr, ParseContext* ctx) {
+  return UnknownFieldParse(tag, metadata->mutable_unknown_fields(), ptr, ctx);
+}
+
 }  // namespace internal
 }  // namespace protobuf
 }  // namespace google
-
-#include <google/protobuf/port_undef.inc>
