@@ -36,7 +36,6 @@
 
 #include <Python.h>
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -225,19 +224,28 @@ bool SetSubmessage(CMessage* self, CMessage* submessage);
 // Corresponds to message api method Clear.
 PyObject* Clear(CMessage* self);
 
-// Clears the data described by the given descriptor.
-// Returns -1 on error.
+// Clears the data described by the given descriptor. Used to clear extensions
+// (which don't have names). Extension release is handled by ExtensionDict
+// class, not this function.
+// TODO(anuraag): Try to make this discrepancy in release semantics with
+//                ClearField less confusing.
 //
 // Corresponds to reflection api method ClearField.
-int ClearFieldByDescriptor(CMessage* self, const FieldDescriptor* descriptor);
+PyObject* ClearFieldByDescriptor(
+    CMessage* self, const FieldDescriptor* descriptor);
+
+// Clears the data for the given field name. The message is released if there
+// are any external references.
+//
+// Corresponds to reflection api method ClearField.
+PyObject* ClearField(CMessage* self, PyObject* arg);
 
 // Checks if the message has the field described by the descriptor. Used for
 // extensions (which have no name).
-// Returns 1 if true, 0 if false, and -1 on error.
 //
 // Corresponds to reflection api method HasField
-int HasFieldByDescriptor(CMessage* self,
-                         const FieldDescriptor* field_descriptor);
+PyObject* HasFieldByDescriptor(
+    CMessage* self, const FieldDescriptor* field_descriptor);
 
 // Checks if the message has the named field.
 //
@@ -283,54 +291,55 @@ PyObject* SetAllowOversizeProtos(PyObject* m, PyObject* arg);
 /* Is 64bit */
 #define IS_64BIT (SIZEOF_LONG == 8)
 
-#define FIELD_IS_REPEATED(field_descriptor) \
-  ((field_descriptor)->label() == FieldDescriptor::LABEL_REPEATED)
+#define FIELD_IS_REPEATED(field_descriptor)                 \
+    ((field_descriptor)->label() == FieldDescriptor::LABEL_REPEATED)
 
-#define GOOGLE_CHECK_GET_INT32(arg, value, err)  \
-  int32_t value;                          \
-  if (!CheckAndGetInteger(arg, &value)) { \
-    return err;                           \
-  }
+#define GOOGLE_CHECK_GET_INT32(arg, value, err)                        \
+    int32 value;                                            \
+    if (!CheckAndGetInteger(arg, &value)) { \
+      return err;                                          \
+    }
 
-#define GOOGLE_CHECK_GET_INT64(arg, value, err)  \
-  int64_t value;                          \
-  if (!CheckAndGetInteger(arg, &value)) { \
-    return err;                           \
-  }
+#define GOOGLE_CHECK_GET_INT64(arg, value, err)                        \
+    int64 value;                                            \
+    if (!CheckAndGetInteger(arg, &value)) { \
+      return err;                                          \
+    }
 
-#define GOOGLE_CHECK_GET_UINT32(arg, value, err) \
-  uint32_t value;                         \
-  if (!CheckAndGetInteger(arg, &value)) { \
-    return err;                           \
-  }
+#define GOOGLE_CHECK_GET_UINT32(arg, value, err)                       \
+    uint32 value;                                           \
+    if (!CheckAndGetInteger(arg, &value)) { \
+      return err;                                          \
+    }
 
-#define GOOGLE_CHECK_GET_UINT64(arg, value, err) \
-  uint64_t value;                         \
-  if (!CheckAndGetInteger(arg, &value)) { \
-    return err;                           \
-  }
+#define GOOGLE_CHECK_GET_UINT64(arg, value, err)                       \
+    uint64 value;                                           \
+    if (!CheckAndGetInteger(arg, &value)) { \
+      return err;                                          \
+    }
 
-#define GOOGLE_CHECK_GET_FLOAT(arg, value, err) \
-  float value;                           \
-  if (!CheckAndGetFloat(arg, &value)) {  \
-    return err;                          \
-  }
+#define GOOGLE_CHECK_GET_FLOAT(arg, value, err)                        \
+    float value;                                            \
+    if (!CheckAndGetFloat(arg, &value)) {                   \
+      return err;                                          \
+    }                                                       \
 
-#define GOOGLE_CHECK_GET_DOUBLE(arg, value, err) \
-  double value;                           \
-  if (!CheckAndGetDouble(arg, &value)) {  \
-    return err;                           \
-  }
+#define GOOGLE_CHECK_GET_DOUBLE(arg, value, err)                       \
+    double value;                                           \
+    if (!CheckAndGetDouble(arg, &value)) {                  \
+      return err;                                          \
+    }
 
-#define GOOGLE_CHECK_GET_BOOL(arg, value, err) \
-  bool value;                           \
-  if (!CheckAndGetBool(arg, &value)) {  \
-    return err;                         \
-  }
+#define GOOGLE_CHECK_GET_BOOL(arg, value, err)                         \
+    bool value;                                             \
+    if (!CheckAndGetBool(arg, &value)) {                    \
+      return err;                                          \
+    }
+
 
 #define FULL_MODULE_NAME "google.protobuf.pyext._message"
 
-void FormatTypeError(PyObject* arg, const char* expected_types);
+void FormatTypeError(PyObject* arg, char* expected_types);
 template<class T>
 bool CheckAndGetInteger(PyObject* arg, T* value);
 bool CheckAndGetDouble(PyObject* arg, double* value);
@@ -344,7 +353,7 @@ bool CheckAndSetString(
     bool append,
     int index);
 PyObject* ToStringObject(const FieldDescriptor* descriptor,
-                         const std::string& value);
+                         const string& value);
 
 // Check if the passed field descriptor belongs to the given message.
 // If not, return false and set a Python exception (a KeyError)
@@ -353,12 +362,10 @@ bool CheckFieldBelongsToMessage(const FieldDescriptor* field_descriptor,
 
 extern PyObject* PickleError_class;
 
-PyObject* PyMessage_New(const Descriptor* descriptor,
-                        PyObject* py_message_factory);
 const Message* PyMessage_GetMessagePointer(PyObject* msg);
 Message* PyMessage_GetMutableMessagePointer(PyObject* msg);
 PyObject* PyMessage_NewMessageOwnedExternally(Message* message,
-                                              PyObject* py_message_factory);
+                                              PyObject* message_factory);
 
 bool InitProto2MessageModule(PyObject *m);
 
