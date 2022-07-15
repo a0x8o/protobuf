@@ -39,10 +39,8 @@
 #include <unistd.h>
 #endif
 #include <errno.h>
-
 #include <algorithm>
 #include <iostream>
-
 #include <google/protobuf/stubs/common.h>
 #include <google/protobuf/stubs/logging.h>
 #include <google/protobuf/io/io_win32.h>
@@ -95,7 +93,7 @@ void FileInputStream::BackUp(int count) { impl_.BackUp(count); }
 
 bool FileInputStream::Skip(int count) { return impl_.Skip(count); }
 
-int64_t FileInputStream::ByteCount() const { return impl_.ByteCount(); }
+int64 FileInputStream::ByteCount() const { return impl_.ByteCount(); }
 
 FileInputStream::CopyingFileInputStream::CopyingFileInputStream(
     int file_descriptor)
@@ -165,13 +163,24 @@ int FileInputStream::CopyingFileInputStream::Skip(int count) {
 // ===================================================================
 
 FileOutputStream::FileOutputStream(int file_descriptor, int block_size)
-    : CopyingOutputStreamAdaptor(&copying_output_),
-      copying_output_(file_descriptor) {}
+    : copying_output_(file_descriptor), impl_(&copying_output_, block_size) {}
+
+FileOutputStream::~FileOutputStream() { impl_.Flush(); }
 
 bool FileOutputStream::Close() {
-  bool flush_succeeded = Flush();
+  bool flush_succeeded = impl_.Flush();
   return copying_output_.Close() && flush_succeeded;
 }
+
+bool FileOutputStream::Flush() { return impl_.Flush(); }
+
+bool FileOutputStream::Next(void** data, int* size) {
+  return impl_.Next(data, size);
+}
+
+void FileOutputStream::BackUp(int count) { impl_.BackUp(count); }
+
+int64 FileOutputStream::ByteCount() const { return impl_.ByteCount(); }
 
 FileOutputStream::CopyingFileOutputStream::CopyingFileOutputStream(
     int file_descriptor)
@@ -179,8 +188,6 @@ FileOutputStream::CopyingFileOutputStream::CopyingFileOutputStream(
       close_on_delete_(false),
       is_closed_(false),
       errno_(0) {}
-
-FileOutputStream::~FileOutputStream() { Flush(); }
 
 FileOutputStream::CopyingFileOutputStream::~CopyingFileOutputStream() {
   if (close_on_delete_) {
@@ -253,7 +260,7 @@ void IstreamInputStream::BackUp(int count) { impl_.BackUp(count); }
 
 bool IstreamInputStream::Skip(int count) { return impl_.Skip(count); }
 
-int64_t IstreamInputStream::ByteCount() const { return impl_.ByteCount(); }
+int64 IstreamInputStream::ByteCount() const { return impl_.ByteCount(); }
 
 IstreamInputStream::CopyingIstreamInputStream::CopyingIstreamInputStream(
     std::istream* input)
@@ -284,7 +291,7 @@ bool OstreamOutputStream::Next(void** data, int* size) {
 
 void OstreamOutputStream::BackUp(int count) { impl_.BackUp(count); }
 
-int64_t OstreamOutputStream::ByteCount() const { return impl_.ByteCount(); }
+int64 OstreamOutputStream::ByteCount() const { return impl_.ByteCount(); }
 
 OstreamOutputStream::CopyingOstreamOutputStream::CopyingOstreamOutputStream(
     std::ostream* output)
@@ -350,7 +357,7 @@ bool ConcatenatingInputStream::Skip(int count) {
   return false;
 }
 
-int64_t ConcatenatingInputStream::ByteCount() const {
+int64 ConcatenatingInputStream::ByteCount() const {
   if (stream_count_ == 0) {
     return bytes_retired_;
   } else {
