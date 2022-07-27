@@ -39,7 +39,6 @@ import static com.google.common.math.LongMath.checkedSubtract;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.protobuf.Duration;
 import com.google.protobuf.Timestamp;
-import java.io.Serializable;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Comparator;
@@ -93,7 +92,7 @@ public final class Timestamps {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ENGLISH);
     GregorianCalendar calendar = new GregorianCalendar(TimeZone.getTimeZone("UTC"));
     // We use Proleptic Gregorian Calendar (i.e., Gregorian calendar extends
-    // backwards to year one) for timestamp formatting.
+    // backwards to year one) for timestamp formating.
     calendar.setGregorianChange(new Date(Long.MIN_VALUE));
     sdf.setCalendar(calendar);
     return sdf;
@@ -101,25 +100,24 @@ public final class Timestamps {
 
   private Timestamps() {}
 
-  private static enum TimestampComparator implements Comparator<Timestamp>, Serializable {
-    INSTANCE;
-
-    @Override
-    public int compare(Timestamp t1, Timestamp t2) {
-      checkValid(t1);
-      checkValid(t2);
-      int secDiff = Long.compare(t1.getSeconds(), t2.getSeconds());
-      return (secDiff != 0) ? secDiff : Integer.compare(t1.getNanos(), t2.getNanos());
-    }
-  }
+  private static final Comparator<Timestamp> COMPARATOR =
+      new Comparator<Timestamp>() {
+        @Override
+        public int compare(Timestamp t1, Timestamp t2) {
+          checkValid(t1);
+          checkValid(t2);
+          int secDiff = Long.compare(t1.getSeconds(), t2.getSeconds());
+          return (secDiff != 0) ? secDiff : Integer.compare(t1.getNanos(), t2.getNanos());
+        }
+      };
 
   /**
    * Returns a {@link Comparator} for {@link Timestamp Timestamps} which sorts in increasing
    * chronological order. Nulls and invalid {@link Timestamp Timestamps} are not allowed (see
-   * {@link #isValid}). The returned comparator is serializable.
+   * {@link #isValid}).
    */
   public static Comparator<Timestamp> comparator() {
-    return TimestampComparator.INSTANCE;
+    return COMPARATOR;
   }
 
   /**
@@ -130,7 +128,7 @@ public final class Timestamps {
    *     and a value greater than {@code 0} if {@code x > y}
    */
   public static int compare(Timestamp x, Timestamp y) {
-    return TimestampComparator.INSTANCE.compare(x, y);
+    return COMPARATOR.compare(x, y);
   }
 
   /**
