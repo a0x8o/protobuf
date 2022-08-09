@@ -45,6 +45,8 @@
 #include <google/protobuf/io/printer.h>
 #include <google/protobuf/io/zero_copy_stream.h>
 
+
+
 namespace google {
 namespace protobuf {
 namespace compiler {
@@ -93,8 +95,6 @@ bool CppGenerator::Generate(const FileDescriptor* file,
       file_options.annotation_guard_name = options[i].second;
     } else if (options[i].first == "speed") {
       file_options.enforce_mode = EnforceOptimizeMode::kSpeed;
-    } else if (options[i].first == "code_size") {
-      file_options.enforce_mode = EnforceOptimizeMode::kCodeSize;
     } else if (options[i].first == "lite") {
       file_options.enforce_mode = EnforceOptimizeMode::kLiteRuntime;
     } else if (options[i].first == "lite_implicit_weak_fields") {
@@ -104,30 +104,10 @@ bool CppGenerator::Generate(const FileDescriptor* file,
         file_options.num_cc_files =
             strto32(options[i].second.c_str(), NULL, 10);
       }
-    } else if (options[i].first == "annotate_accessor") {
-      file_options.annotate_accessor = true;
-    } else if (options[i].first == "inject_field_listener_events") {
-      file_options.inject_field_listener_events = true;
-    } else if (options[i].first == "eagerly_verified_lazy") {
-      file_options.eagerly_verified_lazy = true;
-    } else if (options[i].first == "force_eagerly_verified_lazy") {
-      file_options.force_eagerly_verified_lazy = true;
     } else if (options[i].first == "table_driven_parsing") {
       file_options.table_driven_parsing = true;
     } else if (options[i].first == "table_driven_serialization") {
       file_options.table_driven_serialization = true;
-    } else if (options[i].first == "experimental_tail_call_table_mode") {
-      if (options[i].second == "never") {
-        file_options.tctable_mode = Options::kTCTableNever;
-      } else if (options[i].second == "guarded") {
-        file_options.tctable_mode = Options::kTCTableGuarded;
-      } else if (options[i].second == "always") {
-        file_options.tctable_mode = Options::kTCTableAlways;
-      } else {
-        *error = "Unknown value for experimental_tail_call_table_mode: " +
-                 options[i].second;
-        return false;
-      }
     } else {
       *error = "Unknown generator option: " + options[i].first;
       return false;
