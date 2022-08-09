@@ -113,7 +113,8 @@ class FileGenerator {
   void GenerateSourceIncludes(io::Printer* printer);
   void GenerateSourceDefaultInstance(int idx, io::Printer* printer);
 
-  void GenerateInitForSCC(const SCC* scc, io::Printer* printer);
+  void GenerateInitForSCC(const SCC* scc, const CrossFileReferences& refs,
+                          io::Printer* printer);
   void GenerateTables(io::Printer* printer);
   void GenerateReflectionInitializationCode(io::Printer* printer);
 
@@ -147,7 +148,7 @@ class FileGenerator {
   // Generates extension identifiers.
   void GenerateExtensionIdentifiers(io::Printer* printer);
 
-  // Generates inline function defintions.
+  // Generates inline function definitions.
   void GenerateInlineFunctionDefinitions(io::Printer* printer);
 
   void GenerateProto2NamespaceEnumSpecializations(io::Printer* printer);
@@ -161,14 +162,6 @@ class FileGenerator {
   // generally a breaking change so we prefer the #undef approach.
   void GenerateMacroUndefs(io::Printer* printer);
 
-  bool IsSCCRepresentative(const Descriptor* d) {
-    return GetSCCRepresentative(d) == d;
-  }
-  const Descriptor* GetSCCRepresentative(const Descriptor* d) {
-    return GetSCC(d)->GetRepresentative();
-  }
-  const SCC* GetSCC(const Descriptor* d) { return scc_analyzer_.GetSCC(d); }
-
   bool IsDepWeak(const FileDescriptor* dep) const {
     if (weak_deps_.count(dep) != 0) {
       GOOGLE_CHECK(!options_.opensource_runtime);
@@ -178,7 +171,6 @@ class FileGenerator {
   }
 
   std::set<const FileDescriptor*> weak_deps_;
-  std::vector<const SCC*> sccs_;
 
   const FileDescriptor* file_;
   const Options options_;
