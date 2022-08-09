@@ -40,11 +40,13 @@
 
 #include <algorithm>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <google/protobuf/stubs/common.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/stubs/mutex.h>
+#include <google/protobuf/reflection.h>
 #include <google/protobuf/repeated_field.h>
 
 #ifdef SWIG
@@ -127,27 +129,12 @@ class PROTOBUF_EXPORT DynamicMessageFactory : public MessageFactory {
   const DescriptorPool* pool_;
   bool delegate_to_generated_factory_;
 
-  // This struct just contains a hash_map.  We can't #include <hash_map> from
-  // this header due to hacks needed for hash_map portability in the open source
-  // release.  Namely, stubs/hash.h, which defines hash_map portably, is not a
-  // public header (for good reason), but dynamic_message.h is, and public
-  // headers may only #include other public headers.
-  struct PrototypeMap;
-  std::unique_ptr<PrototypeMap> prototypes_;
+  struct TypeInfo;
+  std::unordered_map<const Descriptor*, const TypeInfo*> prototypes_;
   mutable internal::WrappedMutex prototypes_mutex_;
 
   friend class DynamicMessage;
   const Message* GetPrototypeNoLock(const Descriptor* type);
-
-  // Construct default oneof instance for reflection usage if oneof
-  // is defined.
-  static void ConstructDefaultOneofInstance(const Descriptor* type,
-                                            const uint32 offsets[],
-                                            void* default_oneof_instance);
-  // Delete default oneof instance. Called by ~DynamicMessageFactory.
-  static void DeleteDefaultOneofInstance(const Descriptor* type,
-                                         const uint32 offsets[],
-                                         const void* default_oneof_instance);
 
   GOOGLE_DISALLOW_EVIL_CONSTRUCTORS(DynamicMessageFactory);
 };
@@ -158,16 +145,13 @@ class PROTOBUF_EXPORT DynamicMapSorter {
   static std::vector<const Message*> Sort(const Message& message, int map_size,
                                           const Reflection* reflection,
                                           const FieldDescriptor* field) {
-    std::vector<const Message*> result(static_cast<size_t>(map_size));
-    const RepeatedPtrField<Message>& map_field =
-        reflection->GetRepeatedPtrField<Message>(message, field);
-    size_t i = 0;
-    for (RepeatedPtrField<Message>::const_pointer_iterator it =
-             map_field.pointer_begin();
-         it != map_field.pointer_end();) {
-      result[i++] = *it++;
+    std::vector<const Message*> result;
+    result.reserve(map_size);
+    RepeatedFieldRef<Message> map_field =
+        reflection->GetRepeatedFieldRef<Message>(message, field);
+    for (auto it = map_field.begin(); it != map_field.end(); ++it) {
+      result.push_back(&*it);
     }
-    GOOGLE_DCHECK_EQ(result.size(), i);
     MapEntryMessageComparator comparator(field->message_type());
     std::stable_sort(result.begin(), result.end(), comparator);
     // Complain if the keys aren't in ascending order.
