@@ -54,7 +54,7 @@ enum { IS_COMPILER_MSVC = 1 };
 enum { IS_COMPILER_MSVC = 0 };
 #endif
 
-void StringAppendV(std::string* dst, const char* format, va_list ap) {
+void StringAppendV(string* dst, const char* format, va_list ap) {
   // First try with a small fixed size buffer
   static const int kSpaceLength = 1024;
   char space[kSpaceLength];
@@ -105,16 +105,17 @@ void StringAppendV(std::string* dst, const char* format, va_list ap) {
   delete[] buf;
 }
 
-std::string StringPrintf(const char* format, ...) {
+
+string StringPrintf(const char* format, ...) {
   va_list ap;
   va_start(ap, format);
-  std::string result;
+  string result;
   StringAppendV(&result, format, ap);
   va_end(ap);
   return result;
 }
 
-const std::string& SStringPrintf(std::string* dst, const char* format, ...) {
+const string& SStringPrintf(string* dst, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
   dst->clear();
@@ -123,7 +124,7 @@ const std::string& SStringPrintf(std::string* dst, const char* format, ...) {
   return *dst;
 }
 
-void StringAppendF(std::string* dst, const char* format, ...) {
+void StringAppendF(string* dst, const char* format, ...) {
   va_list ap;
   va_start(ap, format);
   StringAppendV(dst, format, ap);
@@ -138,8 +139,7 @@ const int kStringPrintfVectorMaxArgs = 32;
 // and we can fix the problem or protect against an attack.
 static const char string_printf_empty_block[256] = { '\0' };
 
-std::string StringPrintfVector(const char* format,
-                               const std::vector<std::string>& v) {
+string StringPrintfVector(const char* format, const std::vector<string>& v) {
   GOOGLE_CHECK_LE(v.size(), kStringPrintfVectorMaxArgs)
       << "StringPrintfVector currently only supports up to "
       << kStringPrintfVectorMaxArgs << " arguments. "
@@ -162,7 +162,7 @@ std::string StringPrintfVector(const char* format,
   // that accepts an array of arguments.  The best I can do is stick
   // this COMPILE_ASSERT right next to the actual statement.
 
-  static_assert(kStringPrintfVectorMaxArgs == 32, "arg_count_mismatch");
+  GOOGLE_COMPILE_ASSERT(kStringPrintfVectorMaxArgs == 32, arg_count_mismatch);
   return StringPrintf(format,
                       cstr[0], cstr[1], cstr[2], cstr[3], cstr[4],
                       cstr[5], cstr[6], cstr[7], cstr[8], cstr[9],
