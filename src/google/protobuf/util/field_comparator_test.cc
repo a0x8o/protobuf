@@ -32,16 +32,13 @@
 
 #include <google/protobuf/util/field_comparator.h>
 
+#include <limits>
+
 #include <google/protobuf/unittest.pb.h>
 #include <google/protobuf/descriptor.h>
-#include <google/protobuf/stubs/mathutil.h>
-// This gtest header is put after mathutil.h intentionally. We have to do
-// this because mathutil.h includes mathlimits.h which requires cmath not
-// being included to compile on some versions of gcc:
-//   https://github.com/protocolbuffers/protobuf/blob/818c5eee08840355d70d2f3bdf1a2f17986a5e70/src/google/protobuf/stubs/mathlimits.h#L48
-// and the opensource version gtest.h header includes cmath transitively
-// somehow.
 #include <gtest/gtest.h>
+#include <google/protobuf/stubs/mathutil.h>
+
 namespace google {
 namespace protobuf {
 namespace util {
@@ -248,10 +245,10 @@ TEST_F(DefaultFieldComparatorTest, FloatingPointComparisonTreatNaNsAsEqual) {
   const FieldDescriptor* field_double =
       descriptor_->FindFieldByName("optional_double");
 
-  message_1_.set_optional_float(MathLimits<float>::kNaN);
-  message_2_.set_optional_float(MathLimits<float>::kNaN);
-  message_1_.set_optional_double(MathLimits<double>::kNaN);
-  message_2_.set_optional_double(MathLimits<double>::kNaN);
+  message_1_.set_optional_float(std::numeric_limits<float>::quiet_NaN());
+  message_2_.set_optional_float(std::numeric_limits<float>::quiet_NaN());
+  message_1_.set_optional_double(std::numeric_limits<double>::quiet_NaN());
+  message_2_.set_optional_double(std::numeric_limits<double>::quiet_NaN());
 
   // DefaultFieldComparator's default float comparison mode is EXACT with
   // treating NaNs as different.
@@ -388,6 +385,20 @@ TEST_F(DefaultFieldComparatorTest,
   EXPECT_EQ(
       FieldComparator::SAME,
       comparator_.Compare(message_1_, message_2_, field_double, -1, -1, NULL));
+
+  // Finite values and inf should not be equal, even for a positive fraction.
+  message_1_.set_optional_float(std::numeric_limits<float>::infinity());
+  message_2_.set_optional_float(0.0f);
+  message_1_.set_optional_double(std::numeric_limits<double>::infinity());
+  message_2_.set_optional_double(0.0);
+  comparator_.SetFractionAndMargin(field_float, 0.1, 0.0);
+  comparator_.SetFractionAndMargin(field_double, 0.1, 0.0);
+  EXPECT_EQ(FieldComparator::DIFFERENT,
+            comparator_.Compare(message_1_, message_2_, field_float, -1, -1,
+                                nullptr));
+  EXPECT_EQ(FieldComparator::DIFFERENT,
+            comparator_.Compare(message_1_, message_2_, field_double, -1, -1,
+                                nullptr));
 }
 
 TEST_F(DefaultFieldComparatorTest,
