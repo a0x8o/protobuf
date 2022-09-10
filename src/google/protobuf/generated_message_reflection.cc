@@ -32,6 +32,8 @@
 //  Based on original Protocol Buffers design by
 //  Sanjay Ghemawat, Jeff Dean, and others.
 
+#include <google/protobuf/generated_message_reflection.h>
+
 #include <algorithm>
 #include <set>
 
@@ -40,14 +42,14 @@
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/extension_set.h>
-#include <google/protobuf/generated_message_reflection.h>
 #include <google/protobuf/generated_message_util.h>
-#include <google/protobuf/inlined_string_field.h>
 #include <google/protobuf/map_field.h>
 #include <google/protobuf/map_field_inl.h>
 #include <google/protobuf/stubs/mutex.h>
 #include <google/protobuf/repeated_field.h>
+#include <google/protobuf/unknown_field_set.h>
 #include <google/protobuf/wire_format.h>
+#include <google/protobuf/stubs/strutil.h>
 
 
 #include <google/protobuf/port_def.inc>
@@ -59,8 +61,7 @@ using google::protobuf::internal::DescriptorTable;
 using google::protobuf::internal::ExtensionSet;
 using google::protobuf::internal::GenericTypeHandler;
 using google::protobuf::internal::GetEmptyString;
-using google::protobuf::internal::InlinedStringField;
-using google::protobuf::internal::InternalMetadataWithArena;
+using google::protobuf::internal::InternalMetadata;
 using google::protobuf::internal::LazyField;
 using google::protobuf::internal::MapFieldBase;
 using google::protobuf::internal::MigrationSchema;
@@ -75,11 +76,22 @@ namespace protobuf {
 
 namespace {
 bool IsMapFieldInApi(const FieldDescriptor* field) { return field->is_map(); }
+
+#ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
+Message* MaybeForceCopy(Arena* arena, Message* msg) {
+  if (arena != nullptr || msg == nullptr) return msg;
+
+  Message* copy = msg->New();
+  copy->MergeFrom(*msg);
+  delete msg;
+  return copy;
+}
+#endif  // PROTOBUF_FORCE_COPY_IN_RELEASE
 }  // anonymous namespace
 
 namespace internal {
 
-bool ParseNamedEnum(const EnumDescriptor* descriptor, const std::string& name,
+bool ParseNamedEnum(const EnumDescriptor* descriptor, ConstStringParam name,
                     int* value) {
   const EnumValueDescriptor* d = descriptor->FindValueByName(name);
   if (d == nullptr) return false;
@@ -100,21 +112,9 @@ const std::string& NameOfEnum(const EnumDescriptor* descriptor, int value) {
 
 namespace {
 
-template <class To>
-To* GetPointerAtOffset(Message* message, uint32 offset) {
-  return reinterpret_cast<To*>(reinterpret_cast<char*>(message) + offset);
-}
-
-template <class To>
-const To* GetConstPointerAtOffset(const Message* message, uint32 offset) {
-  return reinterpret_cast<const To*>(reinterpret_cast<const char*>(message) +
-                                     offset);
-}
-
-template <class To>
-const To& GetConstRefAtOffset(const Message& message, uint32 offset) {
-  return *GetConstPointerAtOffset<To>(&message, offset);
-}
+using internal::GetConstPointerAtOffset;
+using internal::GetConstRefAtOffset;
+using internal::GetPointerAtOffset;
 
 void ReportReflectionUsageError(const Descriptor* descriptor,
                                 const FieldDescriptor* field,
@@ -181,6 +181,12 @@ static void ReportReflectionUsageEnumTypeError(
              << value->full_name();
 }
 
+inline void CheckInvalidAccess(const internal::ReflectionSchema& schema,
+                               const FieldDescriptor* field) {
+  GOOGLE_CHECK(!schema.IsFieldStripped(field))
+      << "invalid access to a stripped field " << field->full_name();
+}
+
 #define USAGE_CHECK(CONDITION, METHOD, ERROR_DESCRIPTION) \
   if (!(CONDITION))                                       \
   ReportReflectionUsageError(descriptor_, field, #METHOD, ERROR_DESCRIPTION)
@@ -231,11 +237,23 @@ Reflection::Reflection(const Descriptor* descriptor,
 
 const UnknownFieldSet& Reflection::GetUnknownFields(
     const Message& message) const {
-  return GetInternalMetadataWithArena(message).unknown_fields();
+  return GetInternalMetadata(message).unknown_fields<UnknownFieldSet>(
+      UnknownFieldSet::default_instance);
 }
 
 UnknownFieldSet* Reflection::MutableUnknownFields(Message* message) const {
-  return MutableInternalMetadataWithArena(message)->mutable_unknown_fields();
+  return MutableInternalMetadata(message)
+      ->mutable_unknown_fields<UnknownFieldSet>();
+}
+
+bool Reflection::IsLazilyVerifiedLazyField(const FieldDescriptor* field) const {
+  return field->options().lazy();
+}
+
+bool Reflection::IsEagerlyVerifiedLazyField(
+    const FieldDescriptor* field) const {
+  return (field->type() == FieldDescriptor::TYPE_MESSAGE &&
+          schema_.IsEagerlyVerifiedLazyField(field));
 }
 
 size_t Reflection::SpaceUsedLong(const Message& message) const {
@@ -295,7 +313,7 @@ size_t Reflection::SpaceUsedLong(const Message& message) const {
           break;
       }
     } else {
-      if (field->containing_oneof() && !HasOneofField(message, field)) {
+      if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
         continue;
       }
       switch (field->cpp_type()) {
@@ -314,22 +332,16 @@ size_t Reflection::SpaceUsedLong(const Message& message) const {
           switch (field->options().ctype()) {
             default:  // TODO(kenton):  Support other string reps.
             case FieldOptions::STRING: {
-              if (IsInlined(field)) {
-                const std::string* ptr =
-                    &GetField<InlinedStringField>(message, field).GetNoArena();
-                total_size += StringSpaceUsedExcludingSelfLong(*ptr);
-                break;
-              }
+              const std::string* ptr =
+                  GetField<ArenaStringPtr>(message, field).GetPointer();
 
               // Initially, the string points to the default value stored
               // in the prototype. Only count the string if it has been
               // changed from the default value.
-              const std::string* default_ptr =
-                  &DefaultRaw<ArenaStringPtr>(field).Get();
-              const std::string* ptr =
-                  &GetField<ArenaStringPtr>(message, field).Get();
-
-              if (ptr != default_ptr) {
+              // Except oneof fields, those never point to a default instance,
+              // and there is no default instance to point to.
+              if (schema_.InRealOneof(field) ||
+                  ptr != DefaultRaw<ArenaStringPtr>(field).GetPointer()) {
                 // string fields are represented by just a pointer, so also
                 // include sizeof(string) as well.
                 total_size +=
@@ -358,6 +370,176 @@ size_t Reflection::SpaceUsedLong(const Message& message) const {
   return total_size;
 }
 
+namespace internal {
+
+class SwapFieldHelper {
+ public:
+  template <bool unsafe_shallow_swap>
+  static void SwapRepeatedStringField(const Reflection* r, Message* lhs,
+                                      Message* rhs,
+                                      const FieldDescriptor* field);
+
+  template <bool unsafe_shallow_swap>
+  static void SwapStringField(const Reflection* r, Message* lhs, Message* rhs,
+                              const FieldDescriptor* field);
+
+  static void SwapArenaStringPtr(const std::string* default_ptr,
+                                 ArenaStringPtr* lhs, Arena* lhs_arena,
+                                 ArenaStringPtr* rhs, Arena* rhs_arena);
+
+  template <bool unsafe_shallow_swap>
+  static void SwapRepeatedMessageField(const Reflection* r, Message* lhs,
+                                       Message* rhs,
+                                       const FieldDescriptor* field);
+
+  template <bool unsafe_shallow_swap>
+  static void SwapMessageField(const Reflection* r, Message* lhs, Message* rhs,
+                               const FieldDescriptor* field);
+
+  static void SwapMessage(const Reflection* r, Message* lhs, Arena* lhs_arena,
+                          Message* rhs, Arena* rhs_arena,
+                          const FieldDescriptor* field);
+};
+
+template <bool unsafe_shallow_swap>
+void SwapFieldHelper::SwapRepeatedStringField(const Reflection* r, Message* lhs,
+                                              Message* rhs,
+                                              const FieldDescriptor* field) {
+  switch (field->options().ctype()) {
+    default:
+    case FieldOptions::STRING: {
+      auto* lhs_string = r->MutableRaw<RepeatedPtrFieldBase>(lhs, field);
+      auto* rhs_string = r->MutableRaw<RepeatedPtrFieldBase>(rhs, field);
+      if (unsafe_shallow_swap) {
+        lhs_string->InternalSwap(rhs_string);
+      } else {
+        lhs_string->Swap<GenericTypeHandler<std::string>>(rhs_string);
+      }
+      break;
+    }
+  }
+}
+
+template <bool unsafe_shallow_swap>
+void SwapFieldHelper::SwapStringField(const Reflection* r, Message* lhs,
+                                      Message* rhs,
+                                      const FieldDescriptor* field) {
+  switch (field->options().ctype()) {
+    default:
+    case FieldOptions::STRING: {
+      ArenaStringPtr* lhs_string = r->MutableRaw<ArenaStringPtr>(lhs, field);
+      ArenaStringPtr* rhs_string = r->MutableRaw<ArenaStringPtr>(rhs, field);
+      if (unsafe_shallow_swap) {
+        ArenaStringPtr::UnsafeShallowSwap(lhs_string, rhs_string);
+      } else {
+        SwapFieldHelper::SwapArenaStringPtr(
+            r->DefaultRaw<ArenaStringPtr>(field).GetPointer(),  //
+            lhs_string, lhs->GetArenaForAllocation(),           //
+            rhs_string, rhs->GetArenaForAllocation());
+      }
+      break;
+    }
+  }
+}
+
+void SwapFieldHelper::SwapArenaStringPtr(const std::string* default_ptr,
+                                         ArenaStringPtr* lhs, Arena* lhs_arena,
+                                         ArenaStringPtr* rhs,
+                                         Arena* rhs_arena) {
+  if (lhs_arena == rhs_arena) {
+    ArenaStringPtr::InternalSwap(default_ptr, lhs, lhs_arena, rhs, rhs_arena);
+  } else if (lhs->IsDefault(default_ptr) && rhs->IsDefault(default_ptr)) {
+    // Nothing to do.
+  } else if (lhs->IsDefault(default_ptr)) {
+    lhs->Set(default_ptr, rhs->Get(), lhs_arena);
+    // rhs needs to be destroyed before overwritten.
+    rhs->Destroy(default_ptr, rhs_arena);
+    rhs->UnsafeSetDefault(default_ptr);
+  } else if (rhs->IsDefault(default_ptr)) {
+    rhs->Set(default_ptr, lhs->Get(), rhs_arena);
+    // lhs needs to be destroyed before overwritten.
+    lhs->Destroy(default_ptr, lhs_arena);
+    lhs->UnsafeSetDefault(default_ptr);
+  } else {
+    std::string temp = lhs->Get();
+    lhs->Set(default_ptr, rhs->Get(), lhs_arena);
+    rhs->Set(default_ptr, std::move(temp), rhs_arena);
+  }
+}
+
+template <bool unsafe_shallow_swap>
+void SwapFieldHelper::SwapRepeatedMessageField(const Reflection* r,
+                                               Message* lhs, Message* rhs,
+                                               const FieldDescriptor* field) {
+  if (IsMapFieldInApi(field)) {
+    auto* lhs_map = r->MutableRaw<MapFieldBase>(lhs, field);
+    auto* rhs_map = r->MutableRaw<MapFieldBase>(rhs, field);
+    if (unsafe_shallow_swap) {
+      lhs_map->UnsafeShallowSwap(rhs_map);
+    } else {
+      lhs_map->Swap(rhs_map);
+    }
+  } else {
+    auto* lhs_rm = r->MutableRaw<RepeatedPtrFieldBase>(lhs, field);
+    auto* rhs_rm = r->MutableRaw<RepeatedPtrFieldBase>(rhs, field);
+    if (unsafe_shallow_swap) {
+      lhs_rm->InternalSwap(rhs_rm);
+    } else {
+      lhs_rm->Swap<GenericTypeHandler<Message>>(rhs_rm);
+    }
+  }
+}
+
+template <bool unsafe_shallow_swap>
+void SwapFieldHelper::SwapMessageField(const Reflection* r, Message* lhs,
+                                       Message* rhs,
+                                       const FieldDescriptor* field) {
+  if (unsafe_shallow_swap) {
+    std::swap(*r->MutableRaw<Message*>(lhs, field),
+              *r->MutableRaw<Message*>(rhs, field));
+  } else {
+    SwapMessage(r, lhs, lhs->GetArenaForAllocation(), rhs,
+                rhs->GetArenaForAllocation(), field);
+  }
+}
+
+void SwapFieldHelper::SwapMessage(const Reflection* r, Message* lhs,
+                                  Arena* lhs_arena, Message* rhs,
+                                  Arena* rhs_arena,
+                                  const FieldDescriptor* field) {
+  Message** lhs_sub = r->MutableRaw<Message*>(lhs, field);
+  Message** rhs_sub = r->MutableRaw<Message*>(rhs, field);
+
+  if (*lhs_sub == *rhs_sub) return;
+
+#ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+  if (lhs_arena != nullptr && lhs_arena == rhs_arena) {
+#else   // PROTOBUF_FORCE_COPY_IN_SWAP
+  if (lhs_arena == rhs_arena) {
+#endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+    std::swap(*lhs_sub, *rhs_sub);
+    return;
+  }
+
+  if (*lhs_sub != nullptr && *rhs_sub != nullptr) {
+    (*lhs_sub)->GetReflection()->Swap(*lhs_sub, *rhs_sub);
+  } else if (*lhs_sub == nullptr && r->HasBit(*rhs, field)) {
+    *lhs_sub = (*rhs_sub)->New(lhs_arena);
+    (*lhs_sub)->CopyFrom(**rhs_sub);
+    r->ClearField(rhs, field);
+    // Ensures has bit is unchanged after ClearField.
+    r->SetBit(rhs, field);
+  } else if (*rhs_sub == nullptr && r->HasBit(*lhs, field)) {
+    *rhs_sub = (*lhs_sub)->New(rhs_arena);
+    (*rhs_sub)->CopyFrom(**lhs_sub);
+    r->ClearField(lhs, field);
+    // Ensures has bit is unchanged after ClearField.
+    r->SetBit(lhs, field);
+  }
+}
+
+}  // namespace internal
+
 void Reflection::SwapField(Message* message1, Message* message2,
                            const FieldDescriptor* field) const {
   if (field->is_repeated()) {
@@ -379,24 +561,12 @@ void Reflection::SwapField(Message* message1, Message* message2,
 #undef SWAP_ARRAYS
 
       case FieldDescriptor::CPPTYPE_STRING:
-        switch (field->options().ctype()) {
-          default:  // TODO(kenton):  Support other string reps.
-          case FieldOptions::STRING:
-            MutableRaw<RepeatedPtrFieldBase>(message1, field)
-                ->Swap<GenericTypeHandler<std::string> >(
-                    MutableRaw<RepeatedPtrFieldBase>(message2, field));
-            break;
-        }
+        internal::SwapFieldHelper::SwapRepeatedStringField<false>(
+            this, message1, message2, field);
         break;
       case FieldDescriptor::CPPTYPE_MESSAGE:
-        if (IsMapFieldInApi(field)) {
-          MutableRaw<MapFieldBase>(message1, field)
-              ->Swap(MutableRaw<MapFieldBase>(message2, field));
-        } else {
-          MutableRaw<RepeatedPtrFieldBase>(message1, field)
-              ->Swap<GenericTypeHandler<Message> >(
-                  MutableRaw<RepeatedPtrFieldBase>(message2, field));
-        }
+        internal::SwapFieldHelper::SwapRepeatedMessageField<false>(
+            this, message1, message2, field);
         break;
 
       default:
@@ -420,60 +590,13 @@ void Reflection::SwapField(Message* message1, Message* message2,
       SWAP_VALUES(ENUM, int);
 #undef SWAP_VALUES
       case FieldDescriptor::CPPTYPE_MESSAGE:
-        if (GetArena(message1) == GetArena(message2)) {
-          std::swap(*MutableRaw<Message*>(message1, field),
-                    *MutableRaw<Message*>(message2, field));
-        } else {
-          Message** sub_msg1 = MutableRaw<Message*>(message1, field);
-          Message** sub_msg2 = MutableRaw<Message*>(message2, field);
-          if (*sub_msg1 == nullptr && *sub_msg2 == nullptr) break;
-          if (*sub_msg1 && *sub_msg2) {
-            (*sub_msg1)->GetReflection()->Swap(*sub_msg1, *sub_msg2);
-            break;
-          }
-          if (*sub_msg1 == nullptr) {
-            *sub_msg1 = (*sub_msg2)->New(message1->GetArena());
-            (*sub_msg1)->CopyFrom(**sub_msg2);
-            ClearField(message2, field);
-          } else {
-            *sub_msg2 = (*sub_msg1)->New(message2->GetArena());
-            (*sub_msg2)->CopyFrom(**sub_msg1);
-            ClearField(message1, field);
-          }
-        }
+        internal::SwapFieldHelper::SwapMessageField<false>(this, message1,
+                                                           message2, field);
         break;
 
       case FieldDescriptor::CPPTYPE_STRING:
-        switch (field->options().ctype()) {
-          default:  // TODO(kenton):  Support other string reps.
-          case FieldOptions::STRING: {
-            Arena* arena1 = GetArena(message1);
-            Arena* arena2 = GetArena(message2);
-
-            if (IsInlined(field)) {
-              InlinedStringField* string1 =
-                  MutableRaw<InlinedStringField>(message1, field);
-              InlinedStringField* string2 =
-                  MutableRaw<InlinedStringField>(message2, field);
-              string1->Swap(string2);
-              break;
-            }
-
-            ArenaStringPtr* string1 =
-                MutableRaw<ArenaStringPtr>(message1, field);
-            ArenaStringPtr* string2 =
-                MutableRaw<ArenaStringPtr>(message2, field);
-            const std::string* default_ptr =
-                &DefaultRaw<ArenaStringPtr>(field).Get();
-            if (arena1 == arena2) {
-              string1->Swap(string2, default_ptr, arena1);
-            } else {
-              const std::string temp = string1->Get();
-              string1->Set(default_ptr, string2->Get(), arena1);
-              string2->Set(default_ptr, temp, arena2);
-            }
-          } break;
-        }
+        internal::SwapFieldHelper::SwapStringField<false>(this, message1,
+                                                          message2, field);
         break;
 
       default:
@@ -482,19 +605,69 @@ void Reflection::SwapField(Message* message1, Message* message2,
   }
 }
 
+void Reflection::UnsafeShallowSwapField(Message* message1, Message* message2,
+                                        const FieldDescriptor* field) const {
+  GOOGLE_DCHECK_EQ(message1->GetArenaForAllocation(),
+            message2->GetArenaForAllocation());
+
+  if (!field->is_repeated()) {
+    if (field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
+      internal::SwapFieldHelper::SwapMessageField<true>(this, message1,
+                                                        message2, field);
+    } else if (field->cpp_type() == FieldDescriptor::CPPTYPE_STRING) {
+      internal::SwapFieldHelper::SwapStringField<true>(this, message1, message2,
+                                                       field);
+    } else {
+      SwapField(message1, message2, field);
+    }
+    return;
+  }
+
+  switch (field->cpp_type()) {
+#define SHALLOW_SWAP_ARRAYS(CPPTYPE, TYPE)                                \
+  case FieldDescriptor::CPPTYPE_##CPPTYPE:                                \
+    MutableRaw<RepeatedField<TYPE>>(message1, field)                      \
+        ->InternalSwap(MutableRaw<RepeatedField<TYPE>>(message2, field)); \
+    break;
+
+    SHALLOW_SWAP_ARRAYS(INT32, int32);
+    SHALLOW_SWAP_ARRAYS(INT64, int64);
+    SHALLOW_SWAP_ARRAYS(UINT32, uint32);
+    SHALLOW_SWAP_ARRAYS(UINT64, uint64);
+    SHALLOW_SWAP_ARRAYS(FLOAT, float);
+    SHALLOW_SWAP_ARRAYS(DOUBLE, double);
+    SHALLOW_SWAP_ARRAYS(BOOL, bool);
+    SHALLOW_SWAP_ARRAYS(ENUM, int);
+#undef SHALLOW_SWAP_ARRAYS
+
+    case FieldDescriptor::CPPTYPE_STRING:
+      internal::SwapFieldHelper::SwapRepeatedStringField<true>(this, message1,
+                                                               message2, field);
+      break;
+    case FieldDescriptor::CPPTYPE_MESSAGE:
+      internal::SwapFieldHelper::SwapRepeatedMessageField<true>(
+          this, message1, message2, field);
+      break;
+
+    default:
+      GOOGLE_LOG(FATAL) << "Unimplemented type: " << field->cpp_type();
+  }
+}
+
 void Reflection::SwapOneofField(Message* message1, Message* message2,
                                 const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK(!oneof_descriptor->is_synthetic());
   uint32 oneof_case1 = GetOneofCase(*message1, oneof_descriptor);
   uint32 oneof_case2 = GetOneofCase(*message2, oneof_descriptor);
 
-  int32 temp_int32;
-  int64 temp_int64;
-  uint32 temp_uint32;
-  uint64 temp_uint64;
-  float temp_float;
-  double temp_double;
-  bool temp_bool;
-  int temp_int;
+  int32 temp_int32 = 0;
+  int64 temp_int64 = 0;
+  uint32 temp_uint32 = 0;
+  uint64 temp_uint64 = 0;
+  float temp_float = 0;
+  double temp_double = 0;
+  bool temp_bool = false;
+  int temp_int = 0;
   Message* temp_message = nullptr;
   std::string temp_string;
 
@@ -597,6 +770,45 @@ void Reflection::SwapOneofField(Message* message1, Message* message2,
   }
 }
 
+void Reflection::UnsafeShallowSwapOneofField(
+    Message* message1, Message* message2,
+    const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK_EQ(message1->GetArenaForAllocation(),
+            message2->GetArenaForAllocation());
+
+  uint32 oneof_case1 = GetOneofCase(*message1, oneof_descriptor);
+  const FieldDescriptor* field1 =
+      oneof_case1 > 0 ? descriptor_->FindFieldByNumber(oneof_case1) : nullptr;
+  uint32 oneof_case2 = GetOneofCase(*message2, oneof_descriptor);
+  const FieldDescriptor* field2 =
+      oneof_case2 > 0 ? descriptor_->FindFieldByNumber(oneof_case2) : nullptr;
+
+  if ((field1 != nullptr &&
+       field1->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) ||
+      (field2 != nullptr &&
+       field2->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE)) {
+    // Fallback to SwapOneofField for non-message fields.
+    SwapOneofField(message1, message2, oneof_descriptor);
+    return;
+  }
+
+  Message* temp_message =
+      oneof_case1 > 0 ? UnsafeArenaReleaseMessage(message1, field1) : nullptr;
+
+  if (oneof_case2 > 0) {
+    UnsafeArenaSetAllocatedMessage(
+        message1, UnsafeArenaReleaseMessage(message2, field2), field2);
+  } else {
+    ClearOneof(message1, oneof_descriptor);
+  }
+
+  if (oneof_case1 > 0) {
+    UnsafeArenaSetAllocatedMessage(message2, temp_message, field1);
+  } else {
+    ClearOneof(message2, oneof_descriptor);
+  }
+}
+
 void Reflection::Swap(Message* message1, Message* message2) const {
   if (message1 == message2) return;
 
@@ -620,19 +832,48 @@ void Reflection::Swap(Message* message1, Message* message2) const {
 
   // Check that both messages are in the same arena (or both on the heap). We
   // need to copy all data if not, due to ownership semantics.
-  if (GetArena(message1) != GetArena(message2)) {
-    // Slow copy path.
-    // Use our arena as temp space, if available.
-    Message* temp = message1->New(GetArena(message1));
+#ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+  if (message1->GetOwningArena() == nullptr ||
+      message1->GetOwningArena() != message2->GetOwningArena()) {
+#else   // PROTOBUF_FORCE_COPY_IN_SWAP
+  if (message1->GetOwningArena() != message2->GetOwningArena()) {
+#endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+    // One of the two is guaranteed to have an arena.  Switch things around
+    // to guarantee that message1 has an arena.
+    Arena* arena = message1->GetOwningArena();
+    if (arena == nullptr) {
+      arena = message2->GetOwningArena();
+      std::swap(message1, message2);  // Swapping names for pointers!
+    }
+
+    Message* temp = message1->New(arena);
     temp->MergeFrom(*message2);
     message2->CopyFrom(*message1);
+#ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+    message1->CopyFrom(*temp);
+    if (arena == nullptr) delete temp;
+#else   // PROTOBUF_FORCE_COPY_IN_SWAP
     Swap(message1, temp);
-    if (GetArena(message1) == nullptr) {
-      delete temp;
-    }
+#endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
     return;
   }
 
+  for (int i = 0; i <= last_non_weak_field_index_; i++) {
+    const FieldDescriptor* field = descriptor_->field(i);
+    if (schema_.InRealOneof(field)) continue;
+    if (schema_.IsFieldStripped(field)) continue;
+    SwapField(message1, message2, field);
+  }
+  const int oneof_decl_count = descriptor_->oneof_decl_count();
+  for (int i = 0; i < oneof_decl_count; i++) {
+    const OneofDescriptor* oneof = descriptor_->oneof_decl(i);
+    if (!oneof->is_synthetic()) {
+      SwapOneofField(message1, message2, oneof);
+    }
+  }
+
+  // Swapping bits need to happen after swapping fields, because the latter may
+  // depend on the has bit information.
   if (schema_.HasHasbits()) {
     uint32* has_bits1 = MutableHasBits(message1);
     uint32* has_bits2 = MutableHasBits(message2);
@@ -640,7 +881,7 @@ void Reflection::Swap(Message* message1, Message* message2) const {
     int fields_with_has_bits = 0;
     for (int i = 0; i < descriptor_->field_count(); i++) {
       const FieldDescriptor* field = descriptor_->field(i);
-      if (field->is_repeated() || field->containing_oneof()) {
+      if (field->is_repeated() || schema_.InRealOneof(field)) {
         continue;
       }
       fields_with_has_bits++;
@@ -653,16 +894,6 @@ void Reflection::Swap(Message* message1, Message* message2) const {
     }
   }
 
-  for (int i = 0; i <= last_non_weak_field_index_; i++) {
-    const FieldDescriptor* field = descriptor_->field(i);
-    if (field->containing_oneof()) continue;
-    SwapField(message1, message2, field);
-  }
-  const int oneof_decl_count = descriptor_->oneof_decl_count();
-  for (int i = 0; i < oneof_decl_count; i++) {
-    SwapOneofField(message1, message2, descriptor_->oneof_decl(i));
-  }
-
   if (schema_.HasExtensionSet()) {
     MutableExtensionSet(message1)->Swap(MutableExtensionSet(message2));
   }
@@ -670,7 +901,8 @@ void Reflection::Swap(Message* message1, Message* message2) const {
   MutableUnknownFields(message1)->Swap(MutableUnknownFields(message2));
 }
 
-void Reflection::SwapFields(
+template <bool unsafe_shallow_swap>
+void Reflection::SwapFieldsImpl(
     Message* message1, Message* message2,
     const std::vector<const FieldDescriptor*>& fields) const {
   if (message1 == message2) return;
@@ -695,32 +927,58 @@ void Reflection::SwapFields(
 
   std::set<int> swapped_oneof;
 
-  const int fields_size = static_cast<int>(fields.size());
-  for (int i = 0; i < fields_size; i++) {
-    const FieldDescriptor* field = fields[i];
+  for (const auto* field : fields) {
+    CheckInvalidAccess(schema_, field);
     if (field->is_extension()) {
-      MutableExtensionSet(message1)->SwapExtension(
-          MutableExtensionSet(message2), field->number());
+      if (unsafe_shallow_swap) {
+        MutableExtensionSet(message1)->UnsafeShallowSwapExtension(
+            MutableExtensionSet(message2), field->number());
+      } else {
+        MutableExtensionSet(message1)->SwapExtension(
+            MutableExtensionSet(message2), field->number());
+      }
     } else {
-      if (field->containing_oneof()) {
+      if (schema_.InRealOneof(field)) {
         int oneof_index = field->containing_oneof()->index();
         // Only swap the oneof field once.
         if (swapped_oneof.find(oneof_index) != swapped_oneof.end()) {
           continue;
         }
         swapped_oneof.insert(oneof_index);
-        SwapOneofField(message1, message2, field->containing_oneof());
+        if (unsafe_shallow_swap) {
+          UnsafeShallowSwapOneofField(message1, message2,
+                                      field->containing_oneof());
+        } else {
+          SwapOneofField(message1, message2, field->containing_oneof());
+        }
       } else {
+        // Swap field.
+        if (unsafe_shallow_swap) {
+          UnsafeShallowSwapField(message1, message2, field);
+        } else {
+          SwapField(message1, message2, field);
+        }
         // Swap has bit for non-repeated fields.  We have already checked for
-        // oneof already.
+        // oneof already. This has to be done after SwapField, because SwapField
+        // may depend on the information in has bits.
         if (!field->is_repeated()) {
           SwapBit(message1, message2, field);
         }
-        // Swap field.
-        SwapField(message1, message2, field);
       }
     }
   }
+}
+
+void Reflection::SwapFields(
+    Message* message1, Message* message2,
+    const std::vector<const FieldDescriptor*>& fields) const {
+  SwapFieldsImpl<false>(message1, message2, fields);
+}
+
+void Reflection::UnsafeShallowSwapFields(
+    Message* message1, Message* message2,
+    const std::vector<const FieldDescriptor*>& fields) const {
+  SwapFieldsImpl<true>(message1, message2, fields);
 }
 
 // -------------------------------------------------------------------
@@ -729,11 +987,12 @@ bool Reflection::HasField(const Message& message,
                           const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(HasField);
   USAGE_CHECK_SINGULAR(HasField);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return GetExtensionSet(message).Has(field->number());
   } else {
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       return HasOneofField(message, field);
     } else {
       return HasBit(message, field);
@@ -745,6 +1004,7 @@ int Reflection::FieldSize(const Message& message,
                           const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(FieldSize);
   USAGE_CHECK_REPEATED(FieldSize);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return GetExtensionSet(message).ExtensionSize(field->number());
@@ -789,11 +1049,12 @@ int Reflection::FieldSize(const Message& message,
 void Reflection::ClearField(Message* message,
                             const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(ClearField);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->ClearExtension(field->number());
   } else if (!field->is_repeated()) {
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       ClearOneofField(message, field);
       return;
     }
@@ -825,18 +1086,11 @@ void Reflection::ClearField(Message* message,
           switch (field->options().ctype()) {
             default:  // TODO(kenton):  Support other string reps.
             case FieldOptions::STRING: {
-              if (IsInlined(field)) {
-                const std::string* default_ptr =
-                    &DefaultRaw<InlinedStringField>(field).GetNoArena();
-                MutableRaw<InlinedStringField>(message, field)
-                    ->SetNoArena(default_ptr, *default_ptr);
-                break;
-              }
-
               const std::string* default_ptr =
-                  &DefaultRaw<ArenaStringPtr>(field).Get();
+                  DefaultRaw<ArenaStringPtr>(field).GetPointer();
               MutableRaw<ArenaStringPtr>(message, field)
-                  ->SetAllocated(default_ptr, nullptr, GetArena(message));
+                  ->SetAllocated(default_ptr, nullptr,
+                                 message->GetArenaForAllocation());
               break;
             }
           }
@@ -844,10 +1098,10 @@ void Reflection::ClearField(Message* message,
         }
 
         case FieldDescriptor::CPPTYPE_MESSAGE:
-          if (!schema_.HasHasbits()) {
+          if (schema_.HasBitIndex(field) == static_cast<uint32>(-1)) {
             // Proto3 does not have has-bits and we need to set a message field
             // to nullptr in order to indicate its un-presence.
-            if (GetArena(message) == nullptr) {
+            if (message->GetArenaForAllocation() == nullptr) {
               delete *MutableRaw<Message*>(message, field);
             }
             *MutableRaw<Message*>(message, field) = nullptr;
@@ -903,6 +1157,7 @@ void Reflection::RemoveLast(Message* message,
                             const FieldDescriptor* field) const {
   USAGE_CHECK_MESSAGE_TYPE(RemoveLast);
   USAGE_CHECK_REPEATED(RemoveLast);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->RemoveLast(field->number());
@@ -950,26 +1205,34 @@ void Reflection::RemoveLast(Message* message,
 Message* Reflection::ReleaseLast(Message* message,
                                  const FieldDescriptor* field) const {
   USAGE_CHECK_ALL(ReleaseLast, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
+  Message* released;
   if (field->is_extension()) {
-    return static_cast<Message*>(
+    released = static_cast<Message*>(
         MutableExtensionSet(message)->ReleaseLast(field->number()));
   } else {
     if (IsMapFieldInApi(field)) {
-      return MutableRaw<MapFieldBase>(message, field)
-          ->MutableRepeatedField()
-          ->ReleaseLast<GenericTypeHandler<Message> >();
+      released = MutableRaw<MapFieldBase>(message, field)
+                     ->MutableRepeatedField()
+                     ->ReleaseLast<GenericTypeHandler<Message>>();
     } else {
-      return MutableRaw<RepeatedPtrFieldBase>(message, field)
-          ->ReleaseLast<GenericTypeHandler<Message> >();
+      released = MutableRaw<RepeatedPtrFieldBase>(message, field)
+                     ->ReleaseLast<GenericTypeHandler<Message>>();
     }
   }
+#ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
+  return MaybeForceCopy(message->GetArenaForAllocation(), released);
+#else   // PROTOBUF_FORCE_COPY_IN_RELEASE
+  return released;
+#endif  // !PROTOBUF_FORCE_COPY_IN_RELEASE
 }
 
 void Reflection::SwapElements(Message* message, const FieldDescriptor* field,
                               int index1, int index2) const {
   USAGE_CHECK_MESSAGE_TYPE(Swap);
   USAGE_CHECK_REPEATED(Swap);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->SwapElements(field->number(), index1, index2);
@@ -1026,8 +1289,17 @@ bool CreateUnknownEnumValues(const FileDescriptor* file) {
 }
 }  // namespace
 
-void Reflection::ListFields(const Message& message,
-                            std::vector<const FieldDescriptor*>* output) const {
+namespace internal {
+bool CreateUnknownEnumValues(const FieldDescriptor* field) {
+  bool open_enum = false;
+  return field->file()->syntax() == FileDescriptor::SYNTAX_PROTO3 || open_enum;
+}
+}  // namespace internal
+using internal::CreateUnknownEnumValues;
+
+void Reflection::ListFieldsMayFailOnStripped(
+    const Message& message, bool should_fail,
+    std::vector<const FieldDescriptor*>* output) const {
   output->clear();
 
   // Optimization:  The default instance never has any fields set.
@@ -1035,29 +1307,35 @@ void Reflection::ListFields(const Message& message,
 
   // Optimization: Avoid calling GetHasBits() and HasOneofField() many times
   // within the field loop.  We allow this violation of ReflectionSchema
-  // encapsulation because this function takes a noticable about of CPU
+  // encapsulation because this function takes a noticeable about of CPU
   // fleetwide and properly allowing this optimization through public interfaces
   // seems more trouble than it is worth.
   const uint32* const has_bits =
       schema_.HasHasbits() ? GetHasBits(message) : nullptr;
   const uint32* const has_bits_indices = schema_.has_bit_indices_;
   output->reserve(descriptor_->field_count());
-  for (int i = 0; i <= last_non_weak_field_index_; i++) {
+  const int last_non_weak_field_index = last_non_weak_field_index_;
+  for (int i = 0; i <= last_non_weak_field_index; i++) {
     const FieldDescriptor* field = descriptor_->field(i);
+    if (!should_fail && schema_.IsFieldStripped(field)) {
+      continue;
+    }
     if (field->is_repeated()) {
       if (FieldSize(message, field) > 0) {
         output->push_back(field);
       }
     } else {
       const OneofDescriptor* containing_oneof = field->containing_oneof();
-      if (containing_oneof) {
+      if (schema_.InRealOneof(field)) {
         const uint32* const oneof_case_array = GetConstPointerAtOffset<uint32>(
             &message, schema_.oneof_case_offset_);
         // Equivalent to: HasOneofField(message, field)
-        if (oneof_case_array[containing_oneof->index()] == field->number()) {
+        if (static_cast<int64>(oneof_case_array[containing_oneof->index()]) ==
+            field->number()) {
           output->push_back(field);
         }
-      } else if (has_bits) {
+      } else if (has_bits && has_bits_indices[i] != static_cast<uint32>(-1)) {
+        CheckInvalidAccess(schema_, field);
         // Equivalent to: HasBit(message, field)
         if (IsIndexInHasBitSet(has_bits, has_bits_indices[i])) {
           output->push_back(field);
@@ -1076,6 +1354,16 @@ void Reflection::ListFields(const Message& message,
   std::sort(output->begin(), output->end(), FieldNumberSorter());
 }
 
+void Reflection::ListFields(const Message& message,
+                            std::vector<const FieldDescriptor*>* output) const {
+  ListFieldsMayFailOnStripped(message, true, output);
+}
+
+void Reflection::ListFieldsOmitStripped(
+    const Message& message, std::vector<const FieldDescriptor*>* output) const {
+  ListFieldsMayFailOnStripped(message, false, output);
+}
+
 // -------------------------------------------------------------------
 
 #undef DEFINE_PRIMITIVE_ACCESSORS
@@ -1086,6 +1374,8 @@ void Reflection::ListFields(const Message& message,
     if (field->is_extension()) {                                               \
       return GetExtensionSet(message).Get##TYPENAME(                           \
           field->number(), field->default_value_##PASSTYPE());                 \
+    } else if (schema_.InRealOneof(field) && !HasOneofField(message, field)) { \
+      return field->default_value_##PASSTYPE();                                \
     } else {                                                                   \
       return GetField<TYPE>(message, field);                                   \
     }                                                                          \
@@ -1155,14 +1445,17 @@ std::string Reflection::GetString(const Message& message,
     return GetExtensionSet(message).GetString(field->number(),
                                               field->default_value_string());
   } else {
+    if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
+      return field->default_value_string();
+    }
     switch (field->options().ctype()) {
       default:  // TODO(kenton):  Support other string reps.
       case FieldOptions::STRING: {
-        if (IsInlined(field)) {
-          return GetField<InlinedStringField>(message, field).GetNoArena();
+        if (auto* value =
+                GetField<ArenaStringPtr>(message, field).GetPointer()) {
+          return *value;
         }
-
-        return GetField<ArenaStringPtr>(message, field).Get();
+        return field->default_value_string();
       }
     }
   }
@@ -1176,14 +1469,17 @@ const std::string& Reflection::GetStringReference(const Message& message,
     return GetExtensionSet(message).GetString(field->number(),
                                               field->default_value_string());
   } else {
+    if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
+      return field->default_value_string();
+    }
     switch (field->options().ctype()) {
       default:  // TODO(kenton):  Support other string reps.
       case FieldOptions::STRING: {
-        if (IsInlined(field)) {
-          return GetField<InlinedStringField>(message, field).GetNoArena();
+        if (auto* value =
+                GetField<ArenaStringPtr>(message, field).GetPointer()) {
+          return *value;
         }
-
-        return GetField<ArenaStringPtr>(message, field).Get();
+        return field->default_value_string();
       }
     }
   }
@@ -1191,31 +1487,31 @@ const std::string& Reflection::GetStringReference(const Message& message,
 
 
 void Reflection::SetString(Message* message, const FieldDescriptor* field,
-                           const std::string& value) const {
+                           std::string value) const {
   USAGE_CHECK_ALL(SetString, SINGULAR, STRING);
   if (field->is_extension()) {
-    return MutableExtensionSet(message)->SetString(field->number(),
-                                                   field->type(), value, field);
+    return MutableExtensionSet(message)->SetString(
+        field->number(), field->type(), std::move(value), field);
   } else {
     switch (field->options().ctype()) {
       default:  // TODO(kenton):  Support other string reps.
       case FieldOptions::STRING: {
-        if (IsInlined(field)) {
-          MutableField<InlinedStringField>(message, field)
-              ->SetNoArena(nullptr, value);
-          break;
-        }
-
+        // Oneof string fields are never set as a default instance.
+        // We just need to pass some arbitrary default string to make it work.
+        // This allows us to not have the real default accessible from
+        // reflection.
         const std::string* default_ptr =
-            &DefaultRaw<ArenaStringPtr>(field).Get();
-        if (field->containing_oneof() && !HasOneofField(*message, field)) {
+            schema_.InRealOneof(field)
+                ? nullptr
+                : DefaultRaw<ArenaStringPtr>(field).GetPointer();
+        if (schema_.InRealOneof(field) && !HasOneofField(*message, field)) {
           ClearOneof(message, field->containing_oneof());
           MutableField<ArenaStringPtr>(message, field)
               ->UnsafeSetDefault(default_ptr);
         }
         MutableField<ArenaStringPtr>(message, field)
-            ->Mutable(default_ptr, GetArena(message))
-            ->assign(value);
+            ->Set(default_ptr, std::move(value),
+                  message->GetArenaForAllocation());
         break;
       }
     }
@@ -1256,16 +1552,17 @@ const std::string& Reflection::GetRepeatedStringReference(
 
 void Reflection::SetRepeatedString(Message* message,
                                    const FieldDescriptor* field, int index,
-                                   const std::string& value) const {
+                                   std::string value) const {
   USAGE_CHECK_ALL(SetRepeatedString, REPEATED, STRING);
   if (field->is_extension()) {
     MutableExtensionSet(message)->SetRepeatedString(field->number(), index,
-                                                    value);
+                                                    std::move(value));
   } else {
     switch (field->options().ctype()) {
       default:  // TODO(kenton):  Support other string reps.
       case FieldOptions::STRING:
-        *MutableRepeatedField<std::string>(message, field, index) = value;
+        MutableRepeatedField<std::string>(message, field, index)
+            ->assign(std::move(value));
         break;
     }
   }
@@ -1273,16 +1570,16 @@ void Reflection::SetRepeatedString(Message* message,
 
 
 void Reflection::AddString(Message* message, const FieldDescriptor* field,
-                           const std::string& value) const {
+                           std::string value) const {
   USAGE_CHECK_ALL(AddString, REPEATED, STRING);
   if (field->is_extension()) {
     MutableExtensionSet(message)->AddString(field->number(), field->type(),
-                                            value, field);
+                                            std::move(value), field);
   } else {
     switch (field->options().ctype()) {
       default:  // TODO(kenton):  Support other string reps.
       case FieldOptions::STRING:
-        *AddField<std::string>(message, field) = value;
+        AddField<std::string>(message, field)->assign(std::move(value));
         break;
     }
   }
@@ -1306,6 +1603,8 @@ int Reflection::GetEnumValue(const Message& message,
   if (field->is_extension()) {
     value = GetExtensionSet(message).GetEnum(
         field->number(), field->default_value_enum()->number());
+  } else if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
+    value = field->default_value_enum()->number();
   } else {
     value = GetField<int>(message, field);
   }
@@ -1322,7 +1621,7 @@ void Reflection::SetEnum(Message* message, const FieldDescriptor* field,
 void Reflection::SetEnumValue(Message* message, const FieldDescriptor* field,
                               int value) const {
   USAGE_CHECK_ALL(SetEnumValue, SINGULAR, ENUM);
-  if (!CreateUnknownEnumValues(descriptor_->file())) {
+  if (!CreateUnknownEnumValues(field)) {
     // Check that the value is valid if we don't support direct storage of
     // unknown enum values.
     const EnumValueDescriptor* value_desc =
@@ -1379,7 +1678,7 @@ void Reflection::SetRepeatedEnumValue(Message* message,
                                       const FieldDescriptor* field, int index,
                                       int value) const {
   USAGE_CHECK_ALL(SetRepeatedEnum, REPEATED, ENUM);
-  if (!CreateUnknownEnumValues(descriptor_->file())) {
+  if (!CreateUnknownEnumValues(field)) {
     // Check that the value is valid if we don't support direct storage of
     // unknown enum values.
     const EnumValueDescriptor* value_desc =
@@ -1413,7 +1712,7 @@ void Reflection::AddEnum(Message* message, const FieldDescriptor* field,
 void Reflection::AddEnumValue(Message* message, const FieldDescriptor* field,
                               int value) const {
   USAGE_CHECK_ALL(AddEnum, REPEATED, ENUM);
-  if (!CreateUnknownEnumValues(descriptor_->file())) {
+  if (!CreateUnknownEnumValues(field)) {
     // Check that the value is valid if we don't support direct storage of
     // unknown enum values.
     const EnumValueDescriptor* value_desc =
@@ -1440,10 +1739,45 @@ void Reflection::AddEnumValueInternal(Message* message,
 
 // -------------------------------------------------------------------
 
+const Message* Reflection::GetDefaultMessageInstance(
+    const FieldDescriptor* field) const {
+  // If we are using the generated factory, we cache the prototype in the field
+  // descriptor for faster access.
+  // The default instances of generated messages are not cross-linked, which
+  // means they contain null pointers on their message fields and can't be used
+  // to get the default of submessages.
+  if (message_factory_ == MessageFactory::generated_factory()) {
+    auto& ptr = field->default_generated_instance_;
+    auto* res = ptr.load(std::memory_order_acquire);
+    if (res == nullptr) {
+      // First time asking for this field's default. Load it and cache it.
+      res = message_factory_->GetPrototype(field->message_type());
+      ptr.store(res, std::memory_order_release);
+    }
+    return res;
+  }
+
+  // For other factories, we try the default's object field.
+  // In particular, the DynamicMessageFactory will cross link the default
+  // instances to allow for this. But only do this for real fields.
+  // This is an optimization to avoid going to GetPrototype() below, as that
+  // requires a lock and a map lookup.
+  if (!field->is_extension() && !field->options().weak() &&
+      !IsLazyField(field) && !schema_.InRealOneof(field)) {
+    auto* res = DefaultRaw<const Message*>(field);
+    if (res != nullptr) {
+      return res;
+    }
+  }
+  // Otherwise, just go to the factory.
+  return message_factory_->GetPrototype(field->message_type());
+}
+
 const Message& Reflection::GetMessage(const Message& message,
                                       const FieldDescriptor* field,
                                       MessageFactory* factory) const {
   USAGE_CHECK_ALL(GetMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1451,9 +1785,12 @@ const Message& Reflection::GetMessage(const Message& message,
     return static_cast<const Message&>(GetExtensionSet(message).GetMessage(
         field->number(), field->message_type(), factory));
   } else {
+    if (schema_.InRealOneof(field) && !HasOneofField(message, field)) {
+      return *GetDefaultMessageInstance(field);
+    }
     const Message* result = GetRaw<const Message*>(message, field);
     if (result == nullptr) {
-      result = DefaultRaw<const Message*>(field);
+      result = GetDefaultMessageInstance(field);
     }
     return *result;
   }
@@ -1463,6 +1800,7 @@ Message* Reflection::MutableMessage(Message* message,
                                     const FieldDescriptor* field,
                                     MessageFactory* factory) const {
   USAGE_CHECK_ALL(MutableMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1474,20 +1812,20 @@ Message* Reflection::MutableMessage(Message* message,
 
     Message** result_holder = MutableRaw<Message*>(message, field);
 
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       if (!HasOneofField(*message, field)) {
         ClearOneof(message, field->containing_oneof());
         result_holder = MutableField<Message*>(message, field);
-        const Message* default_message = DefaultRaw<const Message*>(field);
-        *result_holder = default_message->New(message->GetArena());
+        const Message* default_message = GetDefaultMessageInstance(field);
+        *result_holder = default_message->New(message->GetArenaForAllocation());
       }
     } else {
       SetBit(message, field);
     }
 
     if (*result_holder == nullptr) {
-      const Message* default_message = DefaultRaw<const Message*>(field);
-      *result_holder = default_message->New(message->GetArena());
+      const Message* default_message = GetDefaultMessageInstance(field);
+      *result_holder = default_message->New(message->GetArenaForAllocation());
     }
     result = *result_holder;
     return result;
@@ -1498,12 +1836,13 @@ void Reflection::UnsafeArenaSetAllocatedMessage(
     Message* message, Message* sub_message,
     const FieldDescriptor* field) const {
   USAGE_CHECK_ALL(SetAllocatedMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->UnsafeArenaSetAllocatedMessage(
         field->number(), field->type(), field, sub_message);
   } else {
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       if (sub_message == nullptr) {
         ClearOneof(message, field->containing_oneof());
         return;
@@ -1520,7 +1859,7 @@ void Reflection::UnsafeArenaSetAllocatedMessage(
       SetBit(message, field);
     }
     Message** sub_message_holder = MutableRaw<Message*>(message, field);
-    if (GetArena(message) == nullptr) {
+    if (message->GetArenaForAllocation() == nullptr) {
       delete *sub_message_holder;
     }
     *sub_message_holder = sub_message;
@@ -1529,16 +1868,23 @@ void Reflection::UnsafeArenaSetAllocatedMessage(
 
 void Reflection::SetAllocatedMessage(Message* message, Message* sub_message,
                                      const FieldDescriptor* field) const {
+#ifdef PROTOBUF_INTERNAL_USE_MUST_USE_RESULT
+  GOOGLE_DCHECK(sub_message->GetOwningArena() == nullptr ||
+         sub_message->GetOwningArena() == message->GetArenaForAllocation());
+#endif  // PROTOBUF_INTERNAL_USE_MUST_USE_RESULT
+  CheckInvalidAccess(schema_, field);
+
   // If message and sub-message are in different memory ownership domains
   // (different arenas, or one is on heap and one is not), then we may need to
   // do a copy.
   if (sub_message != nullptr &&
-      sub_message->GetArena() != message->GetArena()) {
-    if (sub_message->GetArena() == nullptr && message->GetArena() != nullptr) {
+      sub_message->GetOwningArena() != message->GetArenaForAllocation()) {
+    if (sub_message->GetOwningArena() == nullptr &&
+        message->GetArenaForAllocation() != nullptr) {
       // Case 1: parent is on an arena and child is heap-allocated. We can add
       // the child to the arena's Own() list to free on arena destruction, then
       // set our pointer.
-      message->GetArena()->Own(sub_message);
+      message->GetArenaForAllocation()->Own(sub_message);
       UnsafeArenaSetAllocatedMessage(message, sub_message, field);
     } else {
       // Case 2: all other cases. We need to make a copy. MutableMessage() will
@@ -1557,6 +1903,7 @@ Message* Reflection::UnsafeArenaReleaseMessage(Message* message,
                                                const FieldDescriptor* field,
                                                MessageFactory* factory) const {
   USAGE_CHECK_ALL(ReleaseMessage, SINGULAR, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1565,10 +1912,10 @@ Message* Reflection::UnsafeArenaReleaseMessage(Message* message,
         MutableExtensionSet(message)->UnsafeArenaReleaseMessage(field,
                                                                 factory));
   } else {
-    if (!(field->is_repeated() || field->containing_oneof())) {
+    if (!(field->is_repeated() || schema_.InRealOneof(field))) {
       ClearBit(message, field);
     }
-    if (field->containing_oneof()) {
+    if (schema_.InRealOneof(field)) {
       if (HasOneofField(*message, field)) {
         *MutableOneofCase(message, field->containing_oneof()) = 0;
       } else {
@@ -1585,8 +1932,13 @@ Message* Reflection::UnsafeArenaReleaseMessage(Message* message,
 Message* Reflection::ReleaseMessage(Message* message,
                                     const FieldDescriptor* field,
                                     MessageFactory* factory) const {
+  CheckInvalidAccess(schema_, field);
+
   Message* released = UnsafeArenaReleaseMessage(message, field, factory);
-  if (GetArena(message) != nullptr && released != nullptr) {
+#ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
+  released = MaybeForceCopy(message->GetArenaForAllocation(), released);
+#endif  // PROTOBUF_FORCE_COPY_IN_RELEASE
+  if (message->GetArenaForAllocation() != nullptr && released != nullptr) {
     Message* copy_from_arena = released->New();
     copy_from_arena->CopyFrom(*released);
     released = copy_from_arena;
@@ -1598,6 +1950,7 @@ const Message& Reflection::GetRepeatedMessage(const Message& message,
                                               const FieldDescriptor* field,
                                               int index) const {
   USAGE_CHECK_ALL(GetRepeatedMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return static_cast<const Message&>(
@@ -1618,6 +1971,7 @@ Message* Reflection::MutableRepeatedMessage(Message* message,
                                             const FieldDescriptor* field,
                                             int index) const {
   USAGE_CHECK_ALL(MutableRepeatedMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     return static_cast<Message*>(
@@ -1638,6 +1992,7 @@ Message* Reflection::MutableRepeatedMessage(Message* message,
 Message* Reflection::AddMessage(Message* message, const FieldDescriptor* field,
                                 MessageFactory* factory) const {
   USAGE_CHECK_ALL(AddMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (factory == nullptr) factory = message_factory_;
 
@@ -1665,7 +2020,7 @@ Message* Reflection::AddMessage(Message* message, const FieldDescriptor* field,
       } else {
         prototype = &repeated->Get<GenericTypeHandler<Message> >(0);
       }
-      result = prototype->New(message->GetArena());
+      result = prototype->New(message->GetArenaForAllocation());
       // We can guarantee here that repeated and result are either both heap
       // allocated or arena owned. So it is safe to call the unsafe version
       // of AddAllocated.
@@ -1680,6 +2035,7 @@ void Reflection::AddAllocatedMessage(Message* message,
                                      const FieldDescriptor* field,
                                      Message* new_entry) const {
   USAGE_CHECK_ALL(AddAllocatedMessage, REPEATED, MESSAGE);
+  CheckInvalidAccess(schema_, field);
 
   if (field->is_extension()) {
     MutableExtensionSet(message)->AddAllocatedMessage(field, new_entry);
@@ -1701,7 +2057,11 @@ void* Reflection::MutableRawRepeatedField(Message* message,
                                           int ctype,
                                           const Descriptor* desc) const {
   USAGE_CHECK_REPEATED("MutableRawRepeatedField");
-  if (field->cpp_type() != cpptype)
+  CheckInvalidAccess(schema_, field);
+
+  if (field->cpp_type() != cpptype &&
+      (field->cpp_type() != FieldDescriptor::CPPTYPE_ENUM ||
+       cpptype != FieldDescriptor::CPPTYPE_INT32))
     ReportReflectionUsageTypeError(descriptor_, field,
                                    "MutableRawRepeatedField", cpptype);
   if (desc != nullptr)
@@ -1751,6 +2111,10 @@ const void* Reflection::GetRawRepeatedField(const Message& message,
 
 const FieldDescriptor* Reflection::GetOneofFieldDescriptor(
     const Message& message, const OneofDescriptor* oneof_descriptor) const {
+  if (oneof_descriptor->is_synthetic()) {
+    const FieldDescriptor* field = oneof_descriptor->field(0);
+    return HasField(message, field) ? field : nullptr;
+  }
   uint32 field_number = GetOneofCase(message, oneof_descriptor);
   if (field_number == 0) {
     return nullptr;
@@ -1775,6 +2139,15 @@ bool Reflection::InsertOrLookupMapValue(Message* message,
   val->SetType(field->message_type()->FindFieldByName("value")->cpp_type());
   return MutableRaw<MapFieldBase>(message, field)
       ->InsertOrLookupMapValue(key, val);
+}
+
+bool Reflection::LookupMapValue(const Message& message,
+                                const FieldDescriptor* field, const MapKey& key,
+                                MapValueConstRef* val) const {
+  USAGE_CHECK(IsMapFieldInApi(field), "LookupMapValue",
+              "Field is not a map field.");
+  val->SetType(field->message_type()->FindFieldByName("value")->cpp_type());
+  return GetRaw<MapFieldBase>(message, field).LookupMapValue(key, val);
 }
 
 bool Reflection::DeleteMapValue(Message* message, const FieldDescriptor* field,
@@ -1847,14 +2220,9 @@ Type* Reflection::MutableRawNonOneof(Message* message,
 template <typename Type>
 const Type& Reflection::GetRaw(const Message& message,
                                const FieldDescriptor* field) const {
-  if (field->containing_oneof() && !HasOneofField(message, field)) {
-    return DefaultRaw<Type>(field);
-  }
+  GOOGLE_DCHECK(!schema_.InRealOneof(field) || HasOneofField(message, field))
+      << "Field = " << field->full_name();
   return GetConstRefAtOffset<Type>(message, schema_.GetFieldOffset(field));
-}
-
-bool Reflection::IsInlined(const FieldDescriptor* field) const {
-  return schema_.IsFieldInlined(field);
 }
 
 template <typename Type>
@@ -1875,12 +2243,14 @@ uint32* Reflection::MutableHasBits(Message* message) const {
 
 uint32 Reflection::GetOneofCase(const Message& message,
                                 const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK(!oneof_descriptor->is_synthetic());
   return GetConstRefAtOffset<uint32>(
       message, schema_.GetOneofCaseOffset(oneof_descriptor));
 }
 
 uint32* Reflection::MutableOneofCase(
     Message* message, const OneofDescriptor* oneof_descriptor) const {
+  GOOGLE_DCHECK(!oneof_descriptor->is_synthetic());
   return GetPointerAtOffset<uint32>(
       message, schema_.GetOneofCaseOffset(oneof_descriptor));
 }
@@ -1895,34 +2265,27 @@ ExtensionSet* Reflection::MutableExtensionSet(Message* message) const {
                                           schema_.GetExtensionSetOffset());
 }
 
-Arena* Reflection::GetArena(Message* message) const {
-  return GetInternalMetadataWithArena(*message).arena();
-}
-
-const InternalMetadataWithArena& Reflection::GetInternalMetadataWithArena(
+const InternalMetadata& Reflection::GetInternalMetadata(
     const Message& message) const {
-  return GetConstRefAtOffset<InternalMetadataWithArena>(
-      message, schema_.GetMetadataOffset());
+  return GetConstRefAtOffset<InternalMetadata>(message,
+                                               schema_.GetMetadataOffset());
 }
 
-InternalMetadataWithArena* Reflection::MutableInternalMetadataWithArena(
-    Message* message) const {
-  return GetPointerAtOffset<InternalMetadataWithArena>(
-      message, schema_.GetMetadataOffset());
-}
-
-template <typename Type>
-const Type& Reflection::DefaultRaw(const FieldDescriptor* field) const {
-  return *reinterpret_cast<const Type*>(schema_.GetFieldDefault(field));
+InternalMetadata* Reflection::MutableInternalMetadata(Message* message) const {
+  return GetPointerAtOffset<InternalMetadata>(message,
+                                              schema_.GetMetadataOffset());
 }
 
 // Simple accessors for manipulating has_bits_.
 bool Reflection::HasBit(const Message& message,
                         const FieldDescriptor* field) const {
   GOOGLE_DCHECK(!field->options().weak());
-  if (schema_.HasHasbits()) {
+  if (schema_.HasBitIndex(field) != static_cast<uint32>(-1)) {
     return IsIndexInHasBitSet(GetHasBits(message), schema_.HasBitIndex(field));
   }
+
+  // Intentionally check here because HasBitIndex(field) != -1 means valid.
+  CheckInvalidAccess(schema_, field);
 
   // proto3: no has-bits. All fields present except messages, which are
   // present only if their message-field pointer is non-null.
@@ -1944,11 +2307,6 @@ bool Reflection::HasBit(const Message& message,
       case FieldDescriptor::CPPTYPE_STRING:
         switch (field->options().ctype()) {
           default: {
-            if (IsInlined(field)) {
-              return !GetField<InlinedStringField>(message, field)
-                          .GetNoArena()
-                          .empty();
-            }
             return GetField<ArenaStringPtr>(message, field).Get().size() > 0;
           }
         }
@@ -1980,10 +2338,8 @@ bool Reflection::HasBit(const Message& message,
 
 void Reflection::SetBit(Message* message, const FieldDescriptor* field) const {
   GOOGLE_DCHECK(!field->options().weak());
-  if (!schema_.HasHasbits()) {
-    return;
-  }
   const uint32 index = schema_.HasBitIndex(field);
+  if (index == static_cast<uint32>(-1)) return;
   MutableHasBits(message)[index / 32] |=
       (static_cast<uint32>(1) << (index % 32));
 }
@@ -1991,10 +2347,8 @@ void Reflection::SetBit(Message* message, const FieldDescriptor* field) const {
 void Reflection::ClearBit(Message* message,
                           const FieldDescriptor* field) const {
   GOOGLE_DCHECK(!field->options().weak());
-  if (!schema_.HasHasbits()) {
-    return;
-  }
   const uint32 index = schema_.HasBitIndex(field);
+  if (index == static_cast<uint32>(-1)) return;
   MutableHasBits(message)[index / 32] &=
       ~(static_cast<uint32>(1) << (index % 32));
 }
@@ -2020,12 +2374,16 @@ void Reflection::SwapBit(Message* message1, Message* message2,
 
 bool Reflection::HasOneof(const Message& message,
                           const OneofDescriptor* oneof_descriptor) const {
+  if (oneof_descriptor->is_synthetic()) {
+    return HasField(message, oneof_descriptor->field(0));
+  }
   return (GetOneofCase(message, oneof_descriptor) > 0);
 }
 
 bool Reflection::HasOneofField(const Message& message,
                                const FieldDescriptor* field) const {
-  return (GetOneofCase(message, field->containing_oneof()) == field->number());
+  return (GetOneofCase(message, field->containing_oneof()) ==
+          static_cast<uint32>(field->number()));
 }
 
 void Reflection::SetOneofCase(Message* message,
@@ -2042,22 +2400,28 @@ void Reflection::ClearOneofField(Message* message,
 
 void Reflection::ClearOneof(Message* message,
                             const OneofDescriptor* oneof_descriptor) const {
+  if (oneof_descriptor->is_synthetic()) {
+    ClearField(message, oneof_descriptor->field(0));
+    return;
+  }
   // TODO(jieluo): Consider to cache the unused object instead of deleting
   // it. It will be much faster if an application switches a lot from
   // a few oneof fields.  Time/space tradeoff
   uint32 oneof_case = GetOneofCase(*message, oneof_descriptor);
   if (oneof_case > 0) {
     const FieldDescriptor* field = descriptor_->FindFieldByNumber(oneof_case);
-    if (GetArena(message) == nullptr) {
+    if (message->GetArenaForAllocation() == nullptr) {
       switch (field->cpp_type()) {
         case FieldDescriptor::CPPTYPE_STRING: {
           switch (field->options().ctype()) {
             default:  // TODO(kenton):  Support other string reps.
             case FieldOptions::STRING: {
-              const std::string* default_ptr =
-                  &DefaultRaw<ArenaStringPtr>(field).Get();
+              // Oneof string fields are never set as a default instance.
+              // We just need to pass some arbitrary default string to make it
+              // work. This allows us to not have the real default accessible
+              // from reflection.
               MutableField<ArenaStringPtr>(message, field)
-                  ->Destroy(default_ptr, GetArena(message));
+                  ->Destroy(nullptr, message->GetArenaForAllocation());
               break;
             }
           }
@@ -2076,19 +2440,19 @@ void Reflection::ClearOneof(Message* message,
   }
 }
 
-#define HANDLE_TYPE(TYPE, CPPTYPE, CTYPE)                               \
-  template <>                                                           \
-  const RepeatedField<TYPE>& Reflection::GetRepeatedField<TYPE>(        \
-      const Message& message, const FieldDescriptor* field) const {     \
-    return *static_cast<RepeatedField<TYPE>*>(MutableRawRepeatedField(  \
-        const_cast<Message*>(&message), field, CPPTYPE, CTYPE, NULL));  \
-  }                                                                     \
-                                                                        \
-  template <>                                                           \
-  RepeatedField<TYPE>* Reflection::MutableRepeatedField<TYPE>(          \
-      Message * message, const FieldDescriptor* field) const {          \
-    return static_cast<RepeatedField<TYPE>*>(                           \
-        MutableRawRepeatedField(message, field, CPPTYPE, CTYPE, NULL)); \
+#define HANDLE_TYPE(TYPE, CPPTYPE, CTYPE)                                \
+  template <>                                                            \
+  const RepeatedField<TYPE>& Reflection::GetRepeatedFieldInternal<TYPE>( \
+      const Message& message, const FieldDescriptor* field) const {      \
+    return *static_cast<RepeatedField<TYPE>*>(MutableRawRepeatedField(   \
+        const_cast<Message*>(&message), field, CPPTYPE, CTYPE, NULL));   \
+  }                                                                      \
+                                                                         \
+  template <>                                                            \
+  RepeatedField<TYPE>* Reflection::MutableRepeatedFieldInternal<TYPE>(   \
+      Message * message, const FieldDescriptor* field) const {           \
+    return static_cast<RepeatedField<TYPE>*>(                            \
+        MutableRawRepeatedField(message, field, CPPTYPE, CTYPE, NULL));  \
   }
 
 HANDLE_TYPE(int32, FieldDescriptor::CPPTYPE_INT32, -1);
@@ -2122,19 +2486,19 @@ const Type& Reflection::GetField(const Message& message,
 template <typename Type>
 void Reflection::SetField(Message* message, const FieldDescriptor* field,
                           const Type& value) const {
-  if (field->containing_oneof() && !HasOneofField(*message, field)) {
+  bool real_oneof = schema_.InRealOneof(field);
+  if (real_oneof && !HasOneofField(*message, field)) {
     ClearOneof(message, field->containing_oneof());
   }
   *MutableRaw<Type>(message, field) = value;
-  field->containing_oneof() ? SetOneofCase(message, field)
-                            : SetBit(message, field);
+  real_oneof ? SetOneofCase(message, field) : SetBit(message, field);
 }
 
 template <typename Type>
 Type* Reflection::MutableField(Message* message,
                                const FieldDescriptor* field) const {
-  field->containing_oneof() ? SetOneofCase(message, field)
-                            : SetBit(message, field);
+  schema_.InRealOneof(field) ? SetOneofCase(message, field)
+                             : SetBit(message, field);
   return MutableRaw<Type>(message, field);
 }
 
@@ -2328,7 +2692,9 @@ struct MetadataOwner {
   std::vector<std::pair<const Metadata*, const Metadata*> > metadata_arrays_;
 };
 
-void AssignDescriptorsImpl(const DescriptorTable* table) {
+void AddDescriptors(const DescriptorTable* table);
+
+void AssignDescriptorsImpl(const DescriptorTable* table, bool eager) {
   // Ensure the file descriptor is added to the pool.
   {
     // This only happens once per proto file. So a global mutex to serialize
@@ -2338,6 +2704,25 @@ void AssignDescriptorsImpl(const DescriptorTable* table) {
     AddDescriptors(table);
     mu.Unlock();
   }
+  if (eager) {
+    // Normally we do not want to eagerly build descriptors of our deps.
+    // However if this proto is optimized for code size (ie using reflection)
+    // and it has a message extending a custom option of a descriptor with that
+    // message being optimized for code size as well. Building the descriptors
+    // in this file requires parsing the serialized file descriptor, which now
+    // requires parsing the message extension, which potentially requires
+    // building the descriptor of the message extending one of the options.
+    // However we are already updating descriptor pool under a lock. To prevent
+    // this the compiler statically looks for this case and we just make sure we
+    // first build the descriptors of all our dependencies, preventing the
+    // deadlock.
+    int num_deps = table->num_deps;
+    for (int i = 0; i < num_deps; i++) {
+      // In case of weak fields deps[i] could be null.
+      if (table->deps[i]) AssignDescriptors(table->deps[i], true);
+    }
+  }
+
   // Fill the arrays with pointers to descriptors and reflection classes.
   const FileDescriptor* file =
       DescriptorPool::internal_generated_pool()->FindFileByName(
@@ -2367,15 +2752,13 @@ void AssignDescriptorsImpl(const DescriptorTable* table) {
 }
 
 void AddDescriptorsImpl(const DescriptorTable* table) {
-  // Reflection refers to the default instances so make sure they are
-  // initialized.
-  for (int i = 0; i < table->num_sccs; i++) {
-    internal::InitSCC(table->init_default_instances[i]);
-  }
+  // Reflection refers to the default fields so make sure they are initialized.
+  internal::InitProtobufDefaults();
 
   // Ensure all dependent descriptors are registered to the generated descriptor
   // pool and message factory.
-  for (int i = 0; i < table->num_deps; i++) {
+  int num_deps = table->num_deps;
+  for (int i = 0; i < num_deps; i++) {
     // In case of weak fields deps[i] could be null.
     if (table->deps[i]) AddDescriptors(table->deps[i]);
   }
@@ -2383,6 +2766,16 @@ void AddDescriptorsImpl(const DescriptorTable* table) {
   // Register the descriptor of this file.
   DescriptorPool::InternalAddGeneratedFile(table->descriptor, table->size);
   MessageFactory::InternalRegisterGeneratedFile(table);
+}
+
+void AddDescriptors(const DescriptorTable* table) {
+  // AddDescriptors is not thread safe. Callers need to ensure calls are
+  // properly serialized. This function is only called pre-main by global
+  // descriptors and we can assume single threaded access or it's called
+  // by AssignDescriptorImpl which uses a mutex to sequence calls.
+  if (table->is_initialized) return;
+  table->is_initialized = true;
+  AddDescriptorsImpl(table);
 }
 
 }  // namespace
@@ -2400,18 +2793,24 @@ void RegisterAllTypesInternal(const Metadata* file_level_metadata, int size) {
 
 namespace internal {
 
-void AssignDescriptors(const DescriptorTable* table) {
-  call_once(*table->once, AssignDescriptorsImpl, table);
+Metadata AssignDescriptors(const DescriptorTable* (*table)(),
+                           internal::once_flag* once,
+                           const Metadata& metadata) {
+  call_once(*once, [=] {
+    auto* t = table();
+    AssignDescriptorsImpl(t, t->is_eager);
+  });
+
+  return metadata;
 }
 
-void AddDescriptors(const DescriptorTable* table) {
-  // AddDescriptors is not thread safe. Callers need to ensure calls are
-  // properly serialized. This function is only called pre-main by global
-  // descriptors and we can assume single threaded access or it's called
-  // by AssignDescriptorImpl which uses a mutex to sequence calls.
-  if (*table->is_initialized) return;
-  *table->is_initialized = true;
-  AddDescriptorsImpl(table);
+void AssignDescriptors(const DescriptorTable* table, bool eager) {
+  if (!eager) eager = table->is_eager;
+  call_once(*table->once, AssignDescriptorsImpl, table, eager);
+}
+
+AddDescriptorsRunner::AddDescriptorsRunner(const DescriptorTable* table) {
+  AddDescriptors(table);
 }
 
 void RegisterFileLevelMetadata(const DescriptorTable* table) {
@@ -2423,14 +2822,17 @@ void UnknownFieldSetSerializer(const uint8* base, uint32 offset, uint32 tag,
                                uint32 has_offset,
                                io::CodedOutputStream* output) {
   const void* ptr = base + offset;
-  const InternalMetadataWithArena* metadata =
-      static_cast<const InternalMetadataWithArena*>(ptr);
+  const InternalMetadata* metadata = static_cast<const InternalMetadata*>(ptr);
   if (metadata->have_unknown_fields()) {
-    internal::WireFormat::SerializeUnknownFields(metadata->unknown_fields(),
-                                                 output);
+    internal::WireFormat::SerializeUnknownFields(
+        metadata->unknown_fields<UnknownFieldSet>(
+            UnknownFieldSet::default_instance),
+        output);
   }
 }
 
 }  // namespace internal
 }  // namespace protobuf
 }  // namespace google
+
+#include <google/protobuf/port_undef.inc>
