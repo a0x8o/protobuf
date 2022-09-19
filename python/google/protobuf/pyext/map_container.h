@@ -33,7 +33,6 @@
 
 #include <Python.h>
 
-#include <cstdint>
 #include <memory>
 
 #include <google/protobuf/descriptor.h>
@@ -55,9 +54,12 @@ struct MapContainer : public ContainerBase {
   // Use to get a mutable message when necessary.
   Message* GetMutableMessage();
 
+  // Cache some descriptors, used to convert keys and values.
+  const FieldDescriptor* key_field_descriptor;
+  const FieldDescriptor* value_field_descriptor;
   // We bump this whenever we perform a mutation, to invalidate existing
   // iterators.
-  uint64_t version;
+  uint64 version;
 };
 
 struct MessageMapContainer : public MapContainer {
