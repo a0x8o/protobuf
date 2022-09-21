@@ -30,15 +30,18 @@
 
 // Author: petar@google.com (Petar Petrov)
 
+#include <google/protobuf/pyext/descriptor.h>
+
 #include <Python.h>
 #include <frameobject.h>
+
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
-#include <google/protobuf/pyext/descriptor.h>
 #include <google/protobuf/pyext/descriptor_containers.h>
 #include <google/protobuf/pyext/descriptor_pool.h>
 #include <google/protobuf/pyext/message.h>
@@ -75,7 +78,7 @@ namespace python {
 // All descriptors are stored here.
 std::unordered_map<const void*, PyObject*>* interned_descriptors;
 
-PyObject* PyString_FromCppString(const string& str) {
+PyObject* PyString_FromCppString(const std::string& str) {
   return PyString_FromStringAndSize(str.c_str(), str.size());
 }
 
@@ -192,10 +195,10 @@ const FileDescriptor* GetFileDescriptor(const MethodDescriptor* descriptor) {
 bool Reparse(
     PyMessageFactory* message_factory, const Message& from, Message* to) {
   // Reparse message.
-  string serialized;
+  std::string serialized;
   from.SerializeToString(&serialized);
   io::CodedInputStream input(
-      reinterpret_cast<const uint8*>(serialized.c_str()), serialized.size());
+      reinterpret_cast<const uint8_t*>(serialized.c_str()), serialized.size());
   input.SetExtensionRegistry(message_factory->pool->pool,
                              message_factory->message_factory);
   bool success = to->ParseFromCodedStream(&input);
@@ -247,8 +250,9 @@ static PyObject* GetOrBuildOptions(const DescriptorClass *descriptor) {
                  message_type->full_name().c_str());
     return NULL;
   }
+  ScopedPyObjectPtr args(PyTuple_New(0));
   ScopedPyObjectPtr value(
-      PyEval_CallObject(message_class->AsPyObject(), NULL));
+      PyObject_Call(message_class->AsPyObject(), args.get(), NULL));
   Py_DECREF(message_class);
   if (value == NULL) {
     return NULL;
@@ -481,7 +485,7 @@ static PyObject* GetFile(PyBaseDescriptor *self, void *closure) {
 }
 
 static PyObject* GetConcreteClass(PyBaseDescriptor* self, void *closure) {
-  // Retuns the canonical class for the given descriptor.
+  // Returns the canonical class for the given descriptor.
   // This is the class that was registered with the primary descriptor pool
   // which contains this descriptor.
   // This might not be the one you expect! For example the returned object does
@@ -804,22 +808,22 @@ static PyObject* GetDefaultValue(PyBaseDescriptor *self, void *closure) {
 
   switch (_GetDescriptor(self)->cpp_type()) {
     case FieldDescriptor::CPPTYPE_INT32: {
-      int32 value = _GetDescriptor(self)->default_value_int32();
+      int32_t value = _GetDescriptor(self)->default_value_int32();
       result = PyInt_FromLong(value);
       break;
     }
     case FieldDescriptor::CPPTYPE_INT64: {
-      int64 value = _GetDescriptor(self)->default_value_int64();
+      int64_t value = _GetDescriptor(self)->default_value_int64();
       result = PyLong_FromLongLong(value);
       break;
     }
     case FieldDescriptor::CPPTYPE_UINT32: {
-      uint32 value = _GetDescriptor(self)->default_value_uint32();
+      uint32_t value = _GetDescriptor(self)->default_value_uint32();
       result = PyInt_FromSize_t(value);
       break;
     }
     case FieldDescriptor::CPPTYPE_UINT64: {
-      uint64 value = _GetDescriptor(self)->default_value_uint64();
+      uint64_t value = _GetDescriptor(self)->default_value_uint64();
       result = PyLong_FromUnsignedLongLong(value);
       break;
     }
@@ -839,7 +843,7 @@ static PyObject* GetDefaultValue(PyBaseDescriptor *self, void *closure) {
       break;
     }
     case FieldDescriptor::CPPTYPE_STRING: {
-      const string& value = _GetDescriptor(self)->default_value_string();
+      const std::string& value = _GetDescriptor(self)->default_value_string();
       result = ToStringObject(_GetDescriptor(self), value);
       break;
     }
@@ -1350,7 +1354,7 @@ static PyObject* GetSerializedPb(PyFileDescriptor *self, void *closure) {
   }
   FileDescriptorProto file_proto;
   _GetDescriptor(self)->CopyTo(&file_proto);
-  string contents;
+  std::string contents;
   file_proto.SerializePartialToString(&contents);
   self->serialized_pb = PyBytes_FromStringAndSize(
       contents.c_str(), contents.size());
@@ -1690,7 +1694,7 @@ static PyObject* FindMethodByName(PyBaseDescriptor *self, PyObject* arg) {
   }
 
   const MethodDescriptor* method_descriptor =
-      _GetDescriptor(self)->FindMethodByName(string(name, name_size));
+      _GetDescriptor(self)->FindMethodByName(StringParam(name, name_size));
   if (method_descriptor == NULL) {
     PyErr_Format(PyExc_KeyError, "Couldn't find method %.200s", name);
     return NULL;
