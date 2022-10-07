@@ -76,25 +76,21 @@ public class ExtensionRegistryLite {
   // applications. Need to support this feature on smaller granularity.
   private static volatile boolean eagerlyParseMessageSets = false;
 
-  // short circuit the ExtensionRegistryFactory via assumevalues trickery
-  @SuppressWarnings("JavaOptionalSuggestions")
-  private static boolean doFullRuntimeInheritanceCheck = true;
-
   // Visible for testing.
   static final String EXTENSION_CLASS_NAME = "com.google.protobuf.Extension";
 
-  private static class ExtensionClassHolder {
-    static final Class<?> INSTANCE = resolveExtensionClass();
-
-    static Class<?> resolveExtensionClass() {
-      try {
-        return Class.forName(EXTENSION_CLASS_NAME);
-      } catch (ClassNotFoundException e) {
-        // See comment in ExtensionRegistryFactory on the potential expense of this.
-        return null;
-      }
+  /* @Nullable */
+  static Class<?> resolveExtensionClass() {
+    try {
+      return Class.forName(EXTENSION_CLASS_NAME);
+    } catch (ClassNotFoundException e) {
+      // See comment in ExtensionRegistryFactory on the potential expense of this.
+      return null;
     }
   }
+
+  /* @Nullable */
+  private static final Class<?> extensionClass = resolveExtensionClass();
 
   public static boolean isEagerlyParseMessageSets() {
     return eagerlyParseMessageSets;
@@ -111,9 +107,7 @@ public class ExtensionRegistryLite {
    * available.
    */
   public static ExtensionRegistryLite newInstance() {
-    return doFullRuntimeInheritanceCheck
-        ? ExtensionRegistryFactory.create()
-        : new ExtensionRegistryLite();
+    return ExtensionRegistryFactory.create();
   }
 
   private static volatile ExtensionRegistryLite emptyRegistry;
@@ -128,11 +122,7 @@ public class ExtensionRegistryLite {
       synchronized (ExtensionRegistryLite.class) {
         result = emptyRegistry;
         if (result == null) {
-          result =
-              emptyRegistry =
-                  doFullRuntimeInheritanceCheck
-                      ? ExtensionRegistryFactory.createEmpty()
-                      : EMPTY_REGISTRY_LITE;
+          result = emptyRegistry = ExtensionRegistryFactory.createEmpty();
         }
       }
     }
@@ -173,9 +163,9 @@ public class ExtensionRegistryLite {
     if (GeneratedMessageLite.GeneratedExtension.class.isAssignableFrom(extension.getClass())) {
       add((GeneratedMessageLite.GeneratedExtension<?, ?>) extension);
     }
-    if (doFullRuntimeInheritanceCheck && ExtensionRegistryFactory.isFullRegistry(this)) {
+    if (ExtensionRegistryFactory.isFullRegistry(this)) {
       try {
-        this.getClass().getMethod("add", ExtensionClassHolder.INSTANCE).invoke(this, extension);
+        this.getClass().getMethod("add", extensionClass).invoke(this, extension);
       } catch (Exception e) {
         throw new IllegalArgumentException(
             String.format("Could not invoke ExtensionRegistry#add for %s", extension), e);
