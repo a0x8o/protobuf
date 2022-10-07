@@ -40,8 +40,11 @@
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
-#include <google/protobuf/metadata.h>
+#include <google/protobuf/extension_set.h>
+#include <google/protobuf/generated_message_tctable_decl.h>
+#include <google/protobuf/generated_message_tctable_impl.h>
 #include <google/protobuf/wire_format.h>
+#include <google/protobuf/wire_format_lite.h>
 #include <google/protobuf/stubs/stl_util.h>
 
 #include <google/protobuf/port_def.inc>
@@ -49,9 +52,9 @@
 namespace google {
 namespace protobuf {
 
-const UnknownFieldSet* UnknownFieldSet::default_instance() {
+const UnknownFieldSet& UnknownFieldSet::default_instance() {
   static auto instance = internal::OnShutdownDelete(new UnknownFieldSet());
-  return instance;
+  return *instance;
 }
 
 void UnknownFieldSet::ClearFallback() {
@@ -98,10 +101,9 @@ void UnknownFieldSet::MergeFromAndDestroy(UnknownFieldSet* other) {
   other->fields_.clear();
 }
 
-void UnknownFieldSet::MergeToInternalMetdata(
-    const UnknownFieldSet& other,
-    internal::InternalMetadataWithArena* metadata) {
-  metadata->mutable_unknown_fields()->MergeFrom(other);
+void UnknownFieldSet::MergeToInternalMetadata(
+    const UnknownFieldSet& other, internal::InternalMetadata* metadata) {
+  metadata->mutable_unknown_fields<UnknownFieldSet>()->MergeFrom(other);
 }
 
 size_t UnknownFieldSet::SpaceUsedExcludingSelfLong() const {
@@ -109,8 +111,7 @@ size_t UnknownFieldSet::SpaceUsedExcludingSelfLong() const {
 
   size_t total_size = sizeof(fields_) + sizeof(UnknownField) * fields_.size();
 
-  for (int i = 0; i < fields_.size(); i++) {
-    const UnknownField& field = (fields_)[i];
+  for (const UnknownField& field : fields_) {
     switch (field.type()) {
       case UnknownField::TYPE_LENGTH_DELIMITED:
         total_size += sizeof(*field.data_.length_delimited_.string_value) +
@@ -185,7 +186,7 @@ void UnknownFieldSet::DeleteSubrange(int start, int num) {
     (fields_)[i + start].Delete();
   }
   // Slide down the remaining fields.
-  for (int i = start + num; i < fields_.size(); ++i) {
+  for (size_t i = start + num; i < fields_.size(); ++i) {
     (fields_)[i - num] = (fields_)[i];
   }
   // Pop off the # of deleted fields.
@@ -195,8 +196,8 @@ void UnknownFieldSet::DeleteSubrange(int start, int num) {
 }
 
 void UnknownFieldSet::DeleteByNumber(int number) {
-  int left = 0;  // The number of fields left after deletion.
-  for (int i = 0; i < fields_.size(); ++i) {
+  size_t left = 0;  // The number of fields left after deletion.
+  for (size_t i = 0; i < fields_.size(); ++i) {
     UnknownField* field = &(fields_)[i];
     if (field->number() == number) {
       field->Delete();
@@ -268,50 +269,16 @@ void UnknownField::DeepCopy(const UnknownField& other) {
 }
 
 
-void UnknownField::SerializeLengthDelimitedNoTag(
-    io::CodedOutputStream* output) const {
-  GOOGLE_DCHECK_EQ(TYPE_LENGTH_DELIMITED, type());
-  const std::string& data = *data_.length_delimited_.string_value;
-  output->WriteVarint32(data.size());
-  output->WriteRawMaybeAliased(data.data(), data.size());
-}
-
-uint8* UnknownField::SerializeLengthDelimitedNoTagToArray(uint8* target) const {
+uint8* UnknownField::InternalSerializeLengthDelimitedNoTag(
+    uint8* target, io::EpsCopyOutputStream* stream) const {
   GOOGLE_DCHECK_EQ(TYPE_LENGTH_DELIMITED, type());
   const std::string& data = *data_.length_delimited_.string_value;
   target = io::CodedOutputStream::WriteVarint32ToArray(data.size(), target);
-  target = io::CodedOutputStream::WriteStringToArray(data, target);
+  target = stream->WriteRaw(data.data(), data.size(), target);
   return target;
 }
 
-#if GOOGLE_PROTOBUF_ENABLE_EXPERIMENTAL_PARSER
 namespace internal {
-const char* PackedEnumParser(void* object, const char* ptr, ParseContext* ctx,
-                             bool (*is_valid)(int), UnknownFieldSet* unknown,
-                             int field_num) {
-  return ctx->ReadPackedVarint(
-      ptr, [object, is_valid, unknown, field_num](uint64 val) {
-        if (is_valid(val)) {
-          static_cast<RepeatedField<int>*>(object)->Add(val);
-        } else {
-          WriteVarint(field_num, val, unknown);
-        }
-      });
-}
-const char* PackedEnumParserArg(void* object, const char* ptr,
-                                ParseContext* ctx,
-                                bool (*is_valid)(const void*, int),
-                                const void* data, UnknownFieldSet* unknown,
-                                int field_num) {
-  return ctx->ReadPackedVarint(
-      ptr, [object, is_valid, data, unknown, field_num](uint64 val) {
-        if (is_valid(data, val)) {
-          static_cast<RepeatedField<int>*>(object)->Add(val);
-        } else {
-          WriteVarint(field_num, val, unknown);
-        }
-      });
-}
 
 class UnknownFieldParserHelper {
  public:
@@ -357,13 +324,8 @@ const char* UnknownFieldParse(uint64 tag, UnknownFieldSet* unknown,
   return FieldParser(tag, field_parser, ptr, ctx);
 }
 
-const char* UnknownFieldParse(uint32 tag, InternalMetadataWithArena* metadata,
-                              const char* ptr, ParseContext* ctx) {
-  return UnknownFieldParse(tag, metadata->mutable_unknown_fields(), ptr, ctx);
-}
-
 }  // namespace internal
-#endif  // GOOGLE_PROTOBUF_ENABLE_EXPERIMENTAL_PARSER
-
 }  // namespace protobuf
 }  // namespace google
+
+#include <google/protobuf/port_undef.inc>
