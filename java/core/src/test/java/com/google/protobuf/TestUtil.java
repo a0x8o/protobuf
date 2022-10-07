@@ -260,8 +260,8 @@ public final class TestUtil {
       TestRequired.newBuilder().setA(1).setB(2).setC(3).build();
 
   /** Helper to convert a String to ByteString. */
-  static ByteString toBytes(String str) {
-    return ByteString.copyFrom(str.getBytes(Internal.UTF_8));
+  public static ByteString toBytes(String str) {
+    return ByteString.copyFromUtf8(str);
   }
 
   // BEGIN FULL-RUNTIME
@@ -2776,7 +2776,7 @@ public final class TestUtil {
     }
 
     /** Shorthand to get a FieldDescriptor for a field of unittest::TestAllTypes. */
-    private Descriptors.FieldDescriptor f(String name) {
+    Descriptors.FieldDescriptor f(String name) {
       Descriptors.FieldDescriptor result;
       if (extensionRegistry == null) {
         result = baseDescriptor.findFieldByName(name);
@@ -3758,7 +3758,7 @@ public final class TestUtil {
 
   /** @param filePath The path relative to {@link #getTestDataDir}. */
   public static String readTextFromFile(String filePath) {
-    return readBytesFromFile(filePath).toStringUtf8();
+    return readBytesFromFile(filePath).toStringUtf8().replace(System.getProperty("line.separator"), "\n");
   }
 
   private static File getTestDataDir() {
