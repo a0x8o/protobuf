@@ -37,12 +37,11 @@
 #ifndef GOOGLE_PROTOBUF_IO_PRINTER_H__
 #define GOOGLE_PROTOBUF_IO_PRINTER_H__
 
-
 #include <map>
 #include <string>
 #include <vector>
-
 #include <google/protobuf/stubs/common.h>
+
 #include <google/protobuf/port_def.inc>
 
 namespace google {
@@ -54,7 +53,7 @@ class ZeroCopyOutputStream;  // zero_copy_stream.h
 // Records annotations about a Printer's output.
 class PROTOBUF_EXPORT AnnotationCollector {
  public:
-  // Annotation is a offset range and a payload pair.
+  // Annotation is a ofset range and a payload pair.
   typedef std::pair<std::pair<size_t, size_t>, std::string> Annotation;
 
   // Records that the bytes in file_path beginning with begin_offset and ending
@@ -65,7 +64,7 @@ class PROTOBUF_EXPORT AnnotationCollector {
 
   // TODO(gerbens) I don't see why we need virtuals here. Just a vector of
   // range, payload pairs stored in a context should suffice.
-  virtual void AddAnnotationNew(Annotation& /* a */) {}
+  virtual void AddAnnotationNew(Annotation& a) {}
 
   virtual ~AnnotationCollector() {}
 };
@@ -84,7 +83,7 @@ class AnnotationProtoCollector : public AnnotationCollector {
   // Override for AnnotationCollector::AddAnnotation.
   virtual void AddAnnotation(size_t begin_offset, size_t end_offset,
                              const std::string& file_path,
-                             const std::vector<int>& path) override {
+                             const std::vector<int>& path) {
     typename AnnotationProto::Annotation* annotation =
         annotation_proto_->add_annotation();
     for (int i = 0; i < path.size(); ++i) {
@@ -95,7 +94,7 @@ class AnnotationProtoCollector : public AnnotationCollector {
     annotation->set_end(end_offset);
   }
   // Override for AnnotationCollector::AddAnnotation.
-  virtual void AddAnnotationNew(Annotation& a) override {
+  virtual void AddAnnotationNew(Annotation& a) {
     auto* annotation = annotation_proto_->add_annotation();
     annotation->ParseFromString(a.second);
     annotation->set_begin(a.first.first);
@@ -194,8 +193,8 @@ class PROTOBUF_EXPORT Printer {
 
   ~Printer();
 
-  // Link a substitution variable emitted by the last call to Print to the
-  // object described by descriptor.
+  // Link a subsitution variable emitted by the last call to Print to the object
+  // described by descriptor.
   template <typename SomeDescriptor>
   void Annotate(const char* varname, const SomeDescriptor* descriptor) {
     Annotate(varname, varname, descriptor);
@@ -218,7 +217,7 @@ class PROTOBUF_EXPORT Printer {
     Annotate(begin_varname, end_varname, descriptor->file()->name(), path);
   }
 
-  // Link a substitution variable emitted by the last call to Print to the file
+  // Link a subsitution variable emitted by the last call to Print to the file
   // with path file_name.
   void Annotate(const char* varname, const std::string& file_name) {
     Annotate(varname, varname, file_name);
