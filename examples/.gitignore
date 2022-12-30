@@ -1,2 +1,2 @@
-**/*.db
-**/__pycache__
+# Ignore the bazel symlinks
+/bazel-*
