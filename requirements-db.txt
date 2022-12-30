@@ -10,9 +10,15 @@ infi.clickhouse-orm==1.0.2
 mysqlclient==1.4.2
 psycopg2==2.7.6.1
 pyathena==1.5.1
+<<<<<<< HEAD
 pybigquery==0.4.13
 pydruid==0.5.7
 pyhive==0.6.1
+=======
+pybigquery==0.4.10
+pydruid==0.5.7
+pyhive==0.5.1
+>>>>>>> fc7a329 (Merge pull request #143 from ceastman-ibm/patch-1)
 pyldap==2.4.28
 pymssql==2.1.4
 redis==3.2.1
