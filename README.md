@@ -1,43 +1,57 @@
-# Superset
+Protocol Buffers - Google's data interchange format
+===================================================
 
-![version](https://img.shields.io/docker/v/amancevice/superset?color=blue&label=version&logo=docker&logoColor=eee&sort=semver&style=flat-square)
-[![latest](https://img.shields.io/github/workflow/status/amancevice/docker-superset/latest?label=latest&logo=github&style=flat-square)](https://github.com/amancevice/docker-superset/actions)
-[![edge](https://img.shields.io/github/workflow/status/amancevice/docker-superset/edge?label=edge&logo=github&style=flat-square)](https://github.com/amancevice/docker-superset/actions)
+Copyright 2008 Google Inc.
 
-Docker image for [Superset](https://github.com/ApacheInfra/superset).
+https://developers.google.com/protocol-buffers/
 
-This project is unofficial and not related to Superset or Apache.
+Overview
+--------
 
-## Download
+Protocol Buffers (a.k.a., protobuf) are Google's language-neutral,
+platform-neutral, extensible mechanism for serializing structured data. You
+can find [protobuf's documentation on the Google Developers site](https://developers.google.com/protocol-buffers/).
 
-Download this image from the Docker registry:
+This README file contains protobuf installation instructions. To install
+protobuf, you need to install the protocol compiler (used to compile .proto
+files) and the protobuf runtime for your chosen programming language.
 
-```bash
-docker pull amancevice/superset:<version>
-```
+Protocol Compiler Installation
+------------------------------
 
-## Building
+The protocol compiler is written in C++. If you are using C++, please follow
+the [C++ Installation Instructions](src/README.md) to install protoc along
+with the C++ runtime.
 
-*I do not recommend building this image on your own. Instead, try pulling a tag from the Docker registry.*
+For non-C++ users, the simplest way to install the protocol compiler is to
+download a pre-built binary from our release page:
 
-If you insist on building an image from the source, use the `make` to supervise the build.
+  [https://github.com/protocolbuffers/protobuf/releases](https://github.com/protocolbuffers/protobuf/releases)
 
-```bash
-make [ SUPERSET_VERSION=<version> ]
-```
+In the downloads section of each release, you can find pre-built binaries in
+zip packages: protoc-$VERSION-$PLATFORM.zip. It contains the protoc binary
+as well as a set of standard .proto files distributed along with protobuf.
 
-## Issues
+If you are looking for an old version that is not available in the release
+page, check out the maven repo here:
 
-Please **only** file issues in this project that are related to Docker and **do** include the Docker commands or compose configuration of your setup when filing issues (be sure to hide any secrets/passwords before submitting).
+  [https://repo1.maven.org/maven2/com/google/protobuf/protoc/](https://repo1.maven.org/maven2/com/google/protobuf/protoc/)
 
-File issues/bugs with Superset at the [source](https://github.com/apache/incubator-superset/issues).
+These pre-built binaries are only provided for released versions. If you want
+to use the github master version at HEAD, or you need to modify protobuf code,
+or you are using C++, it's recommended to build your own protoc binary from
+source.
 
-Please **do not** files issues like "Please include `<some-python-pip>` in the Dockerfile," open a [pull request](https://github.com/amancevice/superset/pulls) for updates/enhancements.
+If you would like to build protoc binary from source, see the [C++ Installation
+Instructions](src/README.md).
 
+Protobuf Runtime Installation
+-----------------------------
 
-## Examples
+Protobuf supports several different programming languages. For each programming
+language, you can find instructions in the corresponding source directory about
+how to install protobuf runtime for that specific language:
 
-<<<<<<< HEAD
 | Language                             | Source                                                      | Ubuntu | MacOS | Windows |
 |--------------------------------------|-------------------------------------------------------------|--------|-------|---------|
 | C++ (include C++ runtime and protoc) | [src](src)                                                  | [![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/linux-cpp_distcheck.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fubuntu%2Fcpp_distcheck%2Fcontinuous)<br/>[![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/linux-bazel.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fubuntu%2Fbazel%2Fcontinuous)<br/>[![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/linux-dist_install.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fubuntu%2Fdist_install%2Fcontinuous) | [![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/macos-cpp.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fmacos%2Fcpp%2Fcontinuous)<br/>[![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/macos-cpp_distcheck.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fmacos%2Fcpp_distcheck%2Fcontinuous) | [![Build status](https://ci.appveyor.com/api/projects/status/73ctee6ua4w2ruin?svg=true)](https://ci.appveyor.com/project/protobuf/protobuf) |
@@ -50,57 +64,22 @@ Please **do not** files issues like "Please include `<some-python-pip>` in the D
 | Go                                   | [golang/protobuf](https://github.com/golang/protobuf)       | | | |
 | PHP                                  | [php](php)                                                  | [![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/linux-php_all.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fubuntu%2Fphp_all%2Fcontinuous)<br/>[![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/linux-32-bit.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fubuntu%2F32-bit%2Fcontinuous) | [![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/macos-php5.6_mac.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fmacos%2Fphp5.6_mac%2Fcontinuous)<br/>[![Build status](https://storage.googleapis.com/protobuf-kokoro-results/status-badge/macos-php7.0_mac.png)](https://fusion.corp.google.com/projectanalysis/current/KOKORO/prod:protobuf%2Fgithub%2Fmaster%2Fmacos%2Fphp7.0_mac%2Fcontinuous) | |
 | Dart                                 | [dart-lang/protobuf](https://github.com/dart-lang/protobuf) | [![Build Status](https://travis-ci.org/dart-lang/protobuf.svg?branch=master)](https://travis-ci.org/dart-lang/protobuf) | | |
-=======
-Navigate to the [`examples`](./examples) directory to view examples of how to configure Superset with MySQL, PostgreSQL, or SQLite.
->>>>>>> a0x8o
 
+Quick Start
+-----------
 
-## Versions
+The best way to learn how to use protobuf is to follow the tutorials in our
+developer guide:
 
-This repo is tagged in parallel with superset. Pulling `amancevice/superset:0.18.5` will fetch the image of this repository running superset version `0.18.5`. It is possible that the `latest` tag includes new features/support libraries but will usually be in sync with the latest semantic version.
+https://developers.google.com/protocol-buffers/docs/tutorials
 
+If you want to learn from code examples, take a look at the examples in the
+[examples](examples) directory.
 
-## Configuration
+Documentation
+-------------
 
-Follow the [instructions](https://superset.incubator.apache.org/installation.html#configuration) provided by Apache Superset for writing your own `superset_config.py`. Place this file in a local directory and mount this directory to `/etc/superset` inside the container. This location is included in the image's `PYTHONPATH`. Mounting this file to a different location is possible, but it will need to be in the `PYTHONPATH`.
+The complete documentation for Protocol Buffers is available via the
+web at:
 
-View the contents of the [`examples`](./examples) directory to see some simple `superset_config.py` samples.
-
-
-## Volumes
-
-The image defines two data volumes: one for mounting configuration into the container, and one for data (logs, SQLite DBs, &c).
-
-The configuration volume is located alternatively at `/etc/superset` or `/home/superset`; either is acceptable. Both of these directories are included in the `PYTHONPATH` of the image. Mount any configuration (specifically the `superset_config.py` file) here to have it read by the app on startup.
-
-The data volume is located at `/var/lib/superset` and it is where you would mount your SQLite file (if you are using that as your backend), or a volume to collect any logs that are routed there. This location is used as the value of the `SUPERSET_HOME` environmental variable.
-
-## Database Initialization
-
-After starting the Superset server, initialize the database with an admin user and Superset tables using the `superset-init` helper script:
-
-```bash
-docker run --detach --name superset [options] amancevice/superset
-docker exec -it superset superset-init
-```
-
-## Upgrading
-
-Upgrading to a newer version of superset can be accomplished by re-pulling `amancevice/superset`at a specified superset version or `latest` (see above for more on this). Remove the old container and re-deploy, making sure to use the correct environmental configuration. Finally, ensure the superset database is migrated up to the head:
-
-```bash
-# Pull desired version
-docker pull amancevice/superset
-
-# Remove the current container
-docker rm -f superset-old
-
-# Deploy a new container ...
-docker run --detach --name superset-new [options] amancevice/superset
-
-# Upgrade the DB
-docker exec superset-new superset db upgrade
-
-# Sync the base permissions
-docker exec superset-new superset init
-```
+https://developers.google.com/protocol-buffers/

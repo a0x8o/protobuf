@@ -1,12 +1,18 @@
-# Superset Examples
+# Protocol Buffers - Code Example
 
-Example configurations for MySQL, PostgreSQL, SQLite, and Celery are provided, along with a simple demo script for starting them.
+This directory contains example code that uses Protocol Buffers to manage an
+address book. Two programs are provided for each supported language. The
+add_person example adds a new person to an address book, prompting the user to
+input the person's information. The list_people example lists people already in
+the address book. The examples use the exact same format in all three languages,
+so you can, for example, use add_person_java to create an address book and then
+use list_people_python to read it.
 
-Each demo provides a `superset_config.py` and a `docker-compose.yml`. Use these as guides for laying down your own instances.
+These examples are part of the Protocol Buffers tutorial, located at:
+  https://developers.google.com/protocol-buffers/docs/tutorials
 
-Start a demo of Superset using the `demo.sh` script. The script takes a single argument that determines the back end for Superset: `sqlite`, `mysql`, `postgres`, or `celery`.
+## Build the example using bazel
 
-<<<<<<< HEAD
 The example requires bazel 0.5.4 or newer to build. You can download/install
 the latest version of bazel from bazel's release page:
 
@@ -131,117 +137,8 @@ To run the examples:
 ```sh
 $ dart add_person.dart addessbook.data
 $ dart list_people.dart addressbook.data
-=======
-```bash
-bash demo.sh mysql|postgres|sqlite|celery
->>>>>>> a0x8o
 ```
 
-You will be prompted to set up an admin user.
-
-When finished navigate to [http://localhost:8088/](http://localhost:8088/) to see the demo.
-
-Log in with the credentials you just created.
-
-The demo will live for 5 minutes and then be brought down.
-
-Here is a more detailed explanation of what the demo script is doing:
-
-## MySQL
-
-```bash
-cd mysql
-
-# Start Redis & MySQL services
-docker-compose up -d redis mysql
-# Wait for services to come up fully...
-
-# Start Superset
-docker-compose up -d superset
-# Wait for Superset to come up fully...
-
-# Initialize Superset DB
-docker-compose exec superset superset-demo
-# or `docker-compose exec superset superset-init` if no demo data needed
-
-# Play around in demo...
-
-# Bring everything down
-docker-compose down -v
-```
-
-## PostgreSQL
-
-```bash
-cd postgres
-
-# Start Redis & PostgreSQL services
-docker-compose up -d redis postgres
-# Wait for services to come up fully...
-
-# Start Superset
-docker-compose up -d superset
-# Wait for Superset to come up fully...
-
-# Initialize demo
-docker-compose exec superset superset-demo
-# or `docker-compose exec superset superset-init` if no demo data needed
-
-# Play around in demo...
-
-# Bring everything down
-docker-compose down -v
-```
-
-## SQLite
-
-```bash
-cd sqlite
-
-# Start Redis service
-docker-compose up -d redis
-# Wait for services to come up fully...
-
-# Touch SQLite db file
-mkdir -p superset
-touch superset/superset.db
-
-# Start Superset
-docker-compose up -d superset
-# Wait for Superset to come up fully...
-
-# Initialize demo
-docker-compose exec superset superset-demo
-# or `docker-compose exec superset superset-init` if no demo data needed
-
-# Play around in demo...
-
-# Bring everything down
-docker-compose down -v
-```
-
-## Celery
-
-```bash
-cd celery
-
-# Start Redis & PostgreSQL services
-docker-compose up -d redis postgres
-# Wait for services to come up fully...
-
-# Start Superset
-docker-compose up -d superset
-# Wait for Superset to come up fully...
-
-# Start Celery worker
-docker-compose up -d worker
-
-# Initialize demo
-docker-compose exec superset superset-demo
-# or `docker-compose exec superset superset-init` if no demo data needed
-
-# Play around in demo...
-
-# Bring everything down
-docker-compose down -v
-```
+The two programs take a protocol buffer encoded file as their parameter.
+The first can be used to add a person to the file. The file is created
+if it does not exist. The second displays the data in the file.
